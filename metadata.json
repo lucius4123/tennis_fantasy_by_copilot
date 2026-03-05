@@ -1,0 +1,5 @@
+{
+  "name": "Tennis Fantasy Manager",
+  "description": "A fantasy tennis manager built with Next.js, Supabase, and Tailwind CSS.",
+  "requestFramePermissions": []
+}
