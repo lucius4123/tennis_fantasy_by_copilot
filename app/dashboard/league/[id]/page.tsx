@@ -48,14 +48,17 @@ export default function LeaguePage() {
   useEffect(() => {
     const getUser = async () => {
       const { data: { user } } = await supabase.auth.getUser();
+      console.log('Current user:', user);
+      console.log('League ID from params:', leagueId);
       setUser(user);
       if (user) {
-        const { data: team } = await supabase
+        const { data: team, error } = await supabase
           .from('fantasy_teams')
           .select('id')
           .eq('user_id', user.id)
           .eq('league_id', leagueId)
           .single();
+        console.log('Team query result:', team, 'error:', error);
         setMyTeamId(team?.id || '');
       }
     };
@@ -66,10 +69,12 @@ export default function LeaguePage() {
     if (user) {
       loadLeaderboard();
       loadAuctions();
-      loadMyTeam();
       loadTournaments();
+      if (myTeamId) {
+        loadMyTeam();
+      }
     }
-  }, [user, leagueId]);
+  }, [user, leagueId, myTeamId]);
 
   useEffect(() => {
     const channel = supabase.channel('auctions')
@@ -109,26 +114,39 @@ const loadAuctions = async () => {
 };
 
   const loadMyTeam = async () => {
-    if (!myTeamId) return;
-    const { data } = await supabase
+    if (!myTeamId) {
+      console.log('No myTeamId');
+      return;
+    }
+    console.log('Loading team for myTeamId:', myTeamId);
+    // First get the player IDs from team_players
+    const { data: teamPlayers, error: tpError } = await supabase
       .from('team_players')
-      .select('players(id, first_name, last_name, ranking, country)')
+      .select('player_id')
       .eq('team_id', myTeamId);
-    if (data) {
-    // Hier ist der Trick: Wir mappen durch die Daten und ziehen den Player aus dem Array
-    const formattedData = data.map((auction: any) => ({
-      ...auction,
-      player: Array.isArray(auction.player) ? auction.player[0] : auction.player
-    }));
-    setAuctions(formattedData);
-  }
+
+    console.log('teamPlayers:', teamPlayers, 'error:', tpError);
+
+    if (teamPlayers && teamPlayers.length > 0) {
+      const playerIds = teamPlayers.map(tp => tp.player_id);
+      console.log('playerIds:', playerIds);
+      // Then get the player details
+      const { data: players, error: pError } = await supabase
+        .from('players')
+        .select('id, first_name, last_name, ranking, country')
+        .in('id', playerIds);
+      console.log('players:', players, 'error:', pError);
+      setMyTeam(players || []);
+    } else {
+      console.log('No teamPlayers found');
+      setMyTeam([]);
+    }
   };
 
   const loadTournaments = async () => {
     const { data } = await supabase
       .from('tournaments')
       .select('id, name, start_date')
-      .eq('league_id', leagueId)
       .gt('start_date', new Date().toISOString());
     setTournaments(data || []);
   };

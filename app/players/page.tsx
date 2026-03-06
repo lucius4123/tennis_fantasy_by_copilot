@@ -1,18 +1,71 @@
-import { createClient } from '@/utils/supabase/server'
+'use client'
+
+import { createClient } from '@/utils/supabase/client'
 import Link from 'next/link'
 import { ArrowLeft, Users } from 'lucide-react'
+import { useState, useEffect } from 'react'
 
-export default async function PlayersPage() {
-  const supabase = await createClient()
+export default function PlayersPage() {
+  const [players, setPlayers] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
 
-  // Fetch players from Supabase
-  const { data: players, error } = await supabase
-    .from('players')
-    .select('*')
-    .order('ranking', { ascending: true, nullsFirst: false })
+  useEffect(() => {
+    async function fetchPlayers() {
+      const supabase = createClient() // Note: This is browser client for client component
+      const { data, error } = await supabase
+        .from('players')
+        .select('*')
+        .order('ranking', { ascending: true, nullsFirst: false })
 
-  if (error) {
-    console.error('Error fetching players:', error)
+      if (error) {
+        console.error('Error fetching players:', error)
+        setPlayers([])
+      } else {
+        // map default image for missing urls
+        const defaultUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`
+        const playersWithImages = (data || []).map(p => ({
+          ...p,
+          image_url: p.image_url || defaultUrl,
+        }))
+        setPlayers(playersWithImages)
+      }
+      setLoading(false)
+    }
+
+    fetchPlayers()
+  }, [])
+
+  const handleImageUpload = async (event: React.ChangeEvent<HTMLInputElement>, playerId: string) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('playerId', playerId)
+
+    try {
+      const response = await fetch('/api/upload-player-image', {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (response.ok) {
+        const { imageUrl } = await response.json()
+        // Update the player in state
+        setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, image_url: imageUrl } : p))
+        alert('Image uploaded successfully!')
+      } else {
+        const error = await response.json()
+        alert(`Upload failed: ${error.error}`)
+      }
+    } catch (error) {
+      console.error('Upload error:', error)
+      alert('Upload failed')
+    }
+  }
+
+  if (loading) {
+    return <div className="min-h-screen bg-zinc-50 py-10 px-4 sm:px-6 lg:px-8 flex items-center justify-center">Loading...</div>
   }
 
   return (
@@ -42,6 +95,9 @@ export default async function PlayersPage() {
                     Rank
                   </th>
                   <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider">
+                    Image
+                  </th>
+                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider">
                     Player
                   </th>
                   <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider">
@@ -62,6 +118,15 @@ export default async function PlayersPage() {
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-zinc-900">
                         {player.ranking || '-'}
                       </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {player.image_url ? (
+                          <img src={player.image_url} alt={`${player.first_name} ${player.last_name}`} className="h-10 w-10 rounded-full object-cover" />
+                        ) : (
+                          <div className="h-10 w-10 rounded-full bg-zinc-200 flex items-center justify-center">
+                            <span className="text-xs text-zinc-500">No Image</span>
+                          </div>
+                        )}
+                      </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-zinc-900 font-semibold">
                         {player.first_name} {player.last_name}
                       </td>
@@ -72,15 +137,19 @@ export default async function PlayersPage() {
                         {player.points}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        <button className="text-emerald-600 hover:text-emerald-900 font-medium">
+                        <button className="text-emerald-600 hover:text-emerald-900 font-medium mr-4">
                           Add to Team
                         </button>
+                        <label className="text-blue-600 hover:text-blue-900 font-medium cursor-pointer">
+                          Upload Image
+                          <input type="file" accept="image/*" className="hidden" onChange={(e) => handleImageUpload(e, player.id)} />
+                        </label>
                       </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={5} className="px-6 py-10 text-center text-sm text-zinc-500">
+                    <td colSpan={6} className="px-6 py-10 text-center text-sm text-zinc-500">
                       No players found. Run the sync API to populate the database.
                     </td>
                   </tr>

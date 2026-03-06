@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 
 // Helper function to fetch players from RapidAPI
 async function fetchPlayersFromAPI() {
-  const url = 'https://tennis-api-atp-wta-itf.p.rapidapi.com/tennis/v2/atp/player/'
+  const url = 'https://tennis-api-atp-wta-itf.p.rapidapi.com/tennis/v2/atp/player/' // Limit kann eingestellt werden (Anzahl der Zugriffe)
   const options = {
     method: 'GET',
     headers: {
@@ -56,18 +56,20 @@ export async function GET(request: Request) {
 
     // 3. Pick 10 random players
     // Shuffle array and take first 10
-    const shuffled = allPlayers.sort(() => 0.5 - Math.random())
-    const selectedPlayers = shuffled.slice(0, 10)
+    // const shuffled = allPlayers.sort(() => 0.5 - Math.random())
+    // const selectedPlayers = shuffled.slice(0, 10)
 
     // 4. Map API data to our Supabase schema
     // Note: You might need to adjust the property names based on the actual RapidAPI response
-    const playersToUpsert = selectedPlayers.map((p: any) => ({
+    const defaultImageUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`
+    const playersToUpsert = allPlayers.map((p: any) => ({
       atp_id: p.id || p.player_id, // Adjust based on actual API
       first_name: p.first_name || p.name?.split(' ')[0] || 'Unknown',
       last_name: p.last_name || p.name?.split(' ').slice(1).join(' ') || 'Unknown',
       ranking: p.ranking || p.rank || null,
       points: p.points || 0,
       country: p.country || p.nationality || null,
+      image_url: defaultImageUrl,
       updated_at: new Date().toISOString()
     }))
 
@@ -85,6 +87,12 @@ export async function GET(request: Request) {
       console.error('Supabase Upsert Error:', error)
       return NextResponse.json({ error: 'Failed to upsert players to database' }, { status: 500 })
     }
+
+    // ensure any existing row without an image gets the default placeholder
+    await supabaseAdmin
+      .from('players')
+      .update({ image_url: defaultImageUrl })
+      .is('image_url', null)
 
     return NextResponse.json({ 
       message: 'Successfully synced 10 players', 

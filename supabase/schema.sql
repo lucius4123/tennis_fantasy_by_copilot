@@ -10,6 +10,7 @@ CREATE TABLE players (
     ranking INT,
     points INT DEFAULT 0,
     country TEXT,
+    image_url TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
@@ -63,10 +64,12 @@ CREATE POLICY "Players are viewable by everyone" ON players FOR SELECT USING (tr
 -- Policies for leagues
 CREATE POLICY "Leagues are viewable by everyone" ON leagues FOR SELECT USING (true);
 CREATE POLICY "Users can create leagues" ON leagues FOR INSERT WITH CHECK (auth.uid() = created_by);
+CREATE POLICY "Service role can manage leagues" ON leagues FOR ALL USING (auth.role() = 'service_role');
 
 -- Policies for user_leagues
 CREATE POLICY "Users can see their own leagues" ON user_leagues FOR SELECT USING (auth.uid() = user_id);
 CREATE POLICY "Users can join leagues" ON user_leagues FOR INSERT WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "Service role can manage user_leagues" ON user_leagues FOR ALL USING (auth.role() = 'service_role');
 
 -- Policies for fantasy_teams
 CREATE POLICY "Users can view teams in their leagues" ON fantasy_teams FOR SELECT USING (
@@ -74,6 +77,7 @@ CREATE POLICY "Users can view teams in their leagues" ON fantasy_teams FOR SELEC
 );
 CREATE POLICY "Users can create their own teams" ON fantasy_teams FOR INSERT WITH CHECK (auth.uid() = user_id);
 CREATE POLICY "Users can update their own teams" ON fantasy_teams FOR UPDATE USING (auth.uid() = user_id);
+CREATE POLICY "Service role can manage fantasy_teams" ON fantasy_teams FOR ALL USING (auth.role() = 'service_role');
 
 -- Policies for team_players
 CREATE POLICY "Users can view players in their leagues teams" ON team_players FOR SELECT USING (
@@ -86,6 +90,7 @@ CREATE POLICY "Users can view players in their leagues teams" ON team_players FO
 CREATE POLICY "Users can manage their own team players" ON team_players FOR ALL USING (
     EXISTS (SELECT 1 FROM fantasy_teams WHERE fantasy_teams.id = team_players.team_id AND fantasy_teams.user_id = auth.uid())
 );
+CREATE POLICY "Service role can manage team_players" ON team_players FOR ALL USING (auth.role() = 'service_role');
 
 -- Add columns to fantasy_teams
 ALTER TABLE fantasy_teams ADD COLUMN total_points_scored INT DEFAULT 0;
@@ -110,11 +115,14 @@ CREATE POLICY "Users can view auctions in their leagues" ON market_auctions FOR 
 CREATE POLICY "Users can update auctions in their leagues" ON market_auctions FOR UPDATE USING (
     EXISTS (SELECT 1 FROM user_leagues WHERE user_leagues.league_id = market_auctions.league_id AND user_leagues.user_id = auth.uid())
 );
+CREATE POLICY "Users can create auctions in their leagues" ON market_auctions FOR INSERT WITH CHECK (
+    EXISTS (SELECT 1 FROM user_leagues WHERE user_leagues.league_id = market_auctions.league_id AND user_leagues.user_id = auth.uid())
+);
+CREATE POLICY "Service role can manage market_auctions" ON market_auctions FOR ALL USING (auth.role() = 'service_role');
 
 -- Table: tournaments
 CREATE TABLE tournaments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    league_id UUID REFERENCES leagues(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     start_date TIMESTAMP WITH TIME ZONE NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
@@ -122,9 +130,8 @@ CREATE TABLE tournaments (
 
 -- RLS for tournaments
 ALTER TABLE tournaments ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Users can view tournaments in their leagues" ON tournaments FOR SELECT USING (
-    EXISTS (SELECT 1 FROM user_leagues WHERE user_leagues.league_id = tournaments.league_id AND user_leagues.user_id = auth.uid())
-);
+CREATE POLICY "Everyone can view tournaments" ON tournaments FOR SELECT USING (true);
+CREATE POLICY "Service role can manage tournaments" ON tournaments FOR ALL USING (auth.role() = 'service_role');
 
 -- Table: tournament_lineups
 CREATE TABLE tournament_lineups (
@@ -146,3 +153,38 @@ CREATE POLICY "Users can view lineups in their leagues" ON tournament_lineups FO
 CREATE POLICY "Users can manage their own lineups" ON tournament_lineups FOR ALL USING (
     EXISTS (SELECT 1 FROM fantasy_teams WHERE fantasy_teams.id = tournament_lineups.team_id AND fantasy_teams.user_id = auth.uid())
 );
+
+-- Trigger to prevent player from being in both team_players and market_auctions for the same league
+CREATE OR REPLACE FUNCTION check_player_assignment()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- For team_players insert
+    IF TG_TABLE_NAME = 'team_players' THEN
+        IF EXISTS (
+            SELECT 1 FROM market_auctions ma
+            JOIN fantasy_teams ft ON ft.league_id = ma.league_id
+            WHERE ft.id = NEW.team_id AND ma.player_id = NEW.player_id
+        ) THEN
+            RAISE EXCEPTION 'Player is already assigned to an auction in this league';
+        END IF;
+    -- For market_auctions insert
+    ELSIF TG_TABLE_NAME = 'market_auctions' THEN
+        IF EXISTS (
+            SELECT 1 FROM team_players tp
+            JOIN fantasy_teams ft ON tp.team_id = ft.id
+            WHERE ft.league_id = NEW.league_id AND tp.player_id = NEW.player_id
+        ) THEN
+            RAISE EXCEPTION 'Player is already assigned to a team in this league';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER check_team_players_assignment
+    BEFORE INSERT ON team_players
+    FOR EACH ROW EXECUTE FUNCTION check_player_assignment();
+
+CREATE TRIGGER check_market_auctions_assignment
+    BEFORE INSERT ON market_auctions
+    FOR EACH ROW EXECUTE FUNCTION check_player_assignment();
