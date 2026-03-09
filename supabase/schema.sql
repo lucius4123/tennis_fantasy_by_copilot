@@ -11,8 +11,21 @@ CREATE TABLE players (
     points INT DEFAULT 0,
     country TEXT,
     image_url TEXT,
+    fantasy_avg DECIMAL(5,2) DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Table: player_matches
+CREATE TABLE player_matches (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+    tournament_name TEXT NOT NULL,
+    opponent_name TEXT NOT NULL,
+    match_result TEXT NOT NULL,
+    fantasy_points INT DEFAULT 0,
+    match_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
 -- Table: leagues
@@ -51,6 +64,7 @@ CREATE TABLE team_players (
 
 -- Row Level Security (RLS)
 ALTER TABLE players ENABLE ROW LEVEL SECURITY;
+ALTER TABLE player_matches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE leagues ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_leagues ENABLE ROW LEVEL SECURITY;
 ALTER TABLE fantasy_teams ENABLE ROW LEVEL SECURITY;
@@ -60,6 +74,10 @@ ALTER TABLE team_players ENABLE ROW LEVEL SECURITY;
 -- Everyone can read players
 CREATE POLICY "Players are viewable by everyone" ON players FOR SELECT USING (true);
 -- Only service role can insert/update players (handled via API)
+
+-- Policies for player_matches
+CREATE POLICY "Player matches are viewable by everyone" ON player_matches FOR SELECT USING (true);
+CREATE POLICY "Service role can manage player matches" ON player_matches FOR ALL USING (auth.role() = 'service_role');
 
 -- Policies for leagues
 CREATE POLICY "Leagues are viewable by everyone" ON leagues FOR SELECT USING (true);
@@ -125,13 +143,29 @@ CREATE TABLE tournaments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT NOT NULL,
     start_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    is_active BOOLEAN DEFAULT false,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Table: tournament_players (Many-to-Many relationship between tournaments and players)
+CREATE TABLE tournament_players (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tournament_id UUID REFERENCES tournaments(id) ON DELETE CASCADE,
+    player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+    appearance_probability TEXT NOT NULL CHECK (appearance_probability IN ('Garantiert', 'Sehr Wahrscheinlich', 'Wahrscheinlich', 'Riskant', 'Sehr Riskant')),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    UNIQUE(tournament_id, player_id)
 );
 
 -- RLS for tournaments
 ALTER TABLE tournaments ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Everyone can view tournaments" ON tournaments FOR SELECT USING (true);
 CREATE POLICY "Service role can manage tournaments" ON tournaments FOR ALL USING (auth.role() = 'service_role');
+
+-- RLS for tournament_players
+ALTER TABLE tournament_players ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Everyone can view tournament players" ON tournament_players FOR SELECT USING (true);
+CREATE POLICY "Service role can manage tournament players" ON tournament_players FOR ALL USING (auth.role() = 'service_role');
 
 -- Table: tournament_lineups
 CREATE TABLE tournament_lineups (
@@ -184,6 +218,34 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER check_team_players_assignment
     BEFORE INSERT ON team_players
     FOR EACH ROW EXECUTE FUNCTION check_player_assignment();
+
+-- Function to update player's fantasy average based on last 10 matches
+CREATE OR REPLACE FUNCTION update_player_fantasy_avg()
+RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE players
+    SET fantasy_avg = (
+        SELECT COALESCE(AVG(fantasy_points), 0)
+        FROM (
+            SELECT fantasy_points
+            FROM player_matches
+            WHERE player_id = NEW.player_id
+            ORDER BY match_date DESC
+            LIMIT 10
+        ) recent_matches
+    )
+    WHERE id = NEW.player_id;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER update_fantasy_avg_on_match_insert
+    AFTER INSERT ON player_matches
+    FOR EACH ROW EXECUTE FUNCTION update_player_fantasy_avg();
+
+CREATE TRIGGER update_fantasy_avg_on_match_update
+    AFTER UPDATE ON player_matches
+    FOR EACH ROW EXECUTE FUNCTION update_player_fantasy_avg();
 
 CREATE TRIGGER check_market_auctions_assignment
     BEFORE INSERT ON market_auctions

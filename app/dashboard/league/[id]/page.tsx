@@ -17,6 +17,7 @@ interface Auction {
   highest_bid: number;
   end_time: string;
   player: { first_name: string; last_name: string; ranking: number; country: string };
+  appearance_probability?: string;
 }
 
 interface Player {
@@ -25,6 +26,7 @@ interface Player {
   last_name: string;
   ranking: number;
   country: string;
+  appearance_probability?: string;
 }
 
 interface Tournament {
@@ -44,6 +46,27 @@ export default function LeaguePage() {
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
   const [user, setUser] = useState<any>(null);
   const [myTeamId, setMyTeamId] = useState<string>('');
+  const [activeTournamentId, setActiveTournamentId] = useState<string>('');
+
+  // Helper function to get icon for appearance probability
+  const getProbabilityIcon = (probability?: string) => {
+    if (!probability) return { icon: '❓', color: 'text-gray-400', label: 'Unbekannt' };
+    
+    switch (probability) {
+      case 'Garantiert':
+        return { icon: '✓', color: 'text-green-600', label: 'Garantiert' };
+      case 'Sehr Wahrscheinlich':
+        return { icon: '↗', color: 'text-green-500', label: 'Sehr Wahrscheinlich' };
+      case 'Wahrscheinlich':
+        return { icon: '→', color: 'text-yellow-500', label: 'Wahrscheinlich' };
+      case 'Riskant':
+        return { icon: '↘', color: 'text-orange-500', label: 'Riskant' };
+      case 'Sehr Riskant':
+        return { icon: '⚠', color: 'text-red-500', label: 'Sehr Riskant' };
+      default:
+        return { icon: '❓', color: 'text-gray-400', label: 'Unbekannt' };
+    }
+  };
 
   useEffect(() => {
     const getUser = async () => {
@@ -67,14 +90,20 @@ export default function LeaguePage() {
 
   useEffect(() => {
     if (user) {
+      loadActiveTournament();
       loadLeaderboard();
-      loadAuctions();
       loadTournaments();
+    }
+  }, [user, leagueId]);
+
+  useEffect(() => {
+    if (user && activeTournamentId) {
+      loadAuctions();
       if (myTeamId) {
         loadMyTeam();
       }
     }
-  }, [user, leagueId, myTeamId]);
+  }, [user, leagueId, myTeamId, activeTournamentId]);
 
   useEffect(() => {
     const channel = supabase.channel('auctions')
@@ -96,26 +125,59 @@ export default function LeaguePage() {
     setLeaderboard(data || []);
   };
 
+  const loadActiveTournament = async () => {
+    const { data } = await supabase
+      .from('tournaments')
+      .select('id')
+      .eq('is_active', true)
+      .single();
+    
+    if (data) {
+      setActiveTournamentId(data.id);
+    }
+  };
+
 const loadAuctions = async () => {
+  if (!activeTournamentId) return;
+
   const { data } = await supabase
     .from('market_auctions')
-    .select('id, player_id, highest_bid, end_time, player:players(first_name, last_name, ranking, country)')
+    .select(`
+      id, 
+      player_id, 
+      highest_bid, 
+      end_time, 
+      player:players(first_name, last_name, ranking, country)
+    `)
     .eq('league_id', leagueId)
     .gt('end_time', new Date().toISOString());
 
   if (data) {
-    // Hier ist der Trick: Wir mappen durch die Daten und ziehen den Player aus dem Array
+    // Get appearance probabilities for all players in active tournament
+    const playerIds = data.map((auction: any) => auction.player_id);
+    const { data: probabilities } = await supabase
+      .from('tournament_players')
+      .select('player_id, appearance_probability')
+      .eq('tournament_id', activeTournamentId)
+      .in('player_id', playerIds);
+
+    const probabilityMap = new Map(
+      (probabilities || []).map(p => [p.player_id, p.appearance_probability])
+    );
+
     const formattedData = data.map((auction: any) => ({
       ...auction,
-      player: Array.isArray(auction.player) ? auction.player[0] : auction.player
+      player: Array.isArray(auction.player) ? auction.player[0] : auction.player,
+      appearance_probability: probabilityMap.get(auction.player_id)
     }));
+    
     setAuctions(formattedData);
   }
 };
 
   const loadMyTeam = async () => {
-    if (!myTeamId) {
-      console.log('No myTeamId');
+    if (!myTeamId || !activeTournamentId) {
+      console.log('No myTeamId or activeTournamentId');
       return;
     }
     console.log('Loading team for myTeamId:', myTeamId);
@@ -130,13 +192,31 @@ const loadAuctions = async () => {
     if (teamPlayers && teamPlayers.length > 0) {
       const playerIds = teamPlayers.map(tp => tp.player_id);
       console.log('playerIds:', playerIds);
-      // Then get the player details
+      
+      // Get the player details
       const { data: players, error: pError } = await supabase
         .from('players')
         .select('id, first_name, last_name, ranking, country')
         .in('id', playerIds);
+      
+      // Get appearance probabilities for active tournament
+      const { data: probabilities } = await supabase
+        .from('tournament_players')
+        .select('player_id, appearance_probability')
+        .eq('tournament_id', activeTournamentId)
+        .in('player_id', playerIds);
+
+      const probabilityMap = new Map(
+        (probabilities || []).map(p => [p.player_id, p.appearance_probability])
+      );
+
       console.log('players:', players, 'error:', pError);
-      setMyTeam(players || []);
+      const playersWithProbability = (players || []).map(player => ({
+        ...player,
+        appearance_probability: probabilityMap.get(player.id)
+      }));
+      
+      setMyTeam(playersWithProbability);
     } else {
       console.log('No teamPlayers found');
       setMyTeam([]);
@@ -147,7 +227,9 @@ const loadAuctions = async () => {
     const { data } = await supabase
       .from('tournaments')
       .select('id, name, start_date')
-      .gt('start_date', new Date().toISOString());
+      .eq('is_active', true)
+      .gt('start_date', new Date().toISOString())
+      .order('start_date', { ascending: true });
     setTournaments(data || []);
   };
 
@@ -219,38 +301,49 @@ if (bidAmount > team.budget) return alert('Not enough budget');
         <div>
           <h2 className="text-xl font-semibold mb-4">Transfermarkt</h2>
           <ul className="space-y-4">
-            {auctions.map(auction => (
-              <li
-                key={auction.id}
-                className="p-4 bg-white rounded-xl shadow-sm border border-zinc-100"
-              >
-                <div className="flex justify-between mb-2">
-                  <span className="font-medium">{auction.player.first_name} {auction.player.last_name}</span>
-                  <span className="text-zinc-500">Ranking: {auction.player.ranking}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-zinc-500">Höchstgebot: {auction.highest_bid}</span>
-                  <span className="text-zinc-500">Endet: {new Date(auction.end_time).toLocaleString()}</span>
-                </div>
-                <div className="mt-3 flex items-center space-x-2">
-                  <input
-                    type="number"
-                    id={`bid-${auction.id}`}
-                    className="w-24 px-2 py-1 border rounded"
-                    placeholder="Gebot"
-                  />
-                  <button
-                    onClick={() => {
-                      const bid = parseInt((document.getElementById(`bid-${auction.id}`) as HTMLInputElement).value);
-                      placeBid(auction.id, bid);
-                    }}
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1 rounded"
-                  >
-                    Bieten
-                  </button>
-                </div>
-              </li>
-            ))}
+            {auctions.map(auction => {
+              const probInfo = getProbabilityIcon(auction.appearance_probability);
+              return (
+                <li
+                  key={auction.id}
+                  className="p-4 bg-white rounded-xl shadow-sm border border-zinc-100"
+                >
+                  <div className="flex justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{auction.player.first_name} {auction.player.last_name}</span>
+                      <span 
+                        className={`text-lg ${probInfo.color}`} 
+                        title={probInfo.label}
+                      >
+                        {probInfo.icon}
+                      </span>
+                    </div>
+                    <span className="text-zinc-500">Ranking: {auction.player.ranking}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-zinc-500">Höchstgebot: {auction.highest_bid}</span>
+                    <span className="text-zinc-500">Endet: {new Date(auction.end_time).toLocaleString()}</span>
+                  </div>
+                  <div className="mt-3 flex items-center space-x-2">
+                    <input
+                      type="number"
+                      id={`bid-${auction.id}`}
+                      className="w-24 px-2 py-1 border rounded"
+                      placeholder="Gebot"
+                    />
+                    <button
+                      onClick={() => {
+                        const bid = parseInt((document.getElementById(`bid-${auction.id}`) as HTMLInputElement).value);
+                        placeBid(auction.id, bid);
+                      }}
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1 rounded"
+                    >
+                      Bieten
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
@@ -259,15 +352,26 @@ if (bidAmount > team.budget) return alert('Not enough budget');
         <div>
           <h2 className="text-xl font-semibold mb-4">Mein Team</h2>
           <ul className="space-y-2">
-            {myTeam.map(player => (
-              <li
-                key={player.id}
-                className="flex justify-between p-3 bg-white rounded-xl shadow-sm border border-zinc-100"
-              >
-                <span>{player.first_name} {player.last_name}</span>
-                <span className="text-zinc-500">#{player.ranking} – {player.country}</span>
-              </li>
-            ))}
+            {myTeam.map(player => {
+              const probInfo = getProbabilityIcon(player.appearance_probability);
+              return (
+                <li
+                  key={player.id}
+                  className="flex justify-between p-3 bg-white rounded-xl shadow-sm border border-zinc-100"
+                >
+                  <div className="flex items-center gap-2">
+                    <span>{player.first_name} {player.last_name}</span>
+                    <span 
+                      className={`text-lg ${probInfo.color}`} 
+                      title={probInfo.label}
+                    >
+                      {probInfo.icon}
+                    </span>
+                  </div>
+                  <span className="text-zinc-500">#{player.ranking} – {player.country}</span>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
