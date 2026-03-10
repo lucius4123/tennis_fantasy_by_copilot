@@ -20,13 +20,52 @@ CREATE TABLE players (
 CREATE TABLE player_matches (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+    tournament_id UUID REFERENCES tournaments(id) ON DELETE SET NULL,
     tournament_name TEXT NOT NULL,
     opponent_name TEXT NOT NULL,
     match_result TEXT NOT NULL,
     fantasy_points INT DEFAULT 0,
     match_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    -- Detailed match statistics
+    aces INT DEFAULT 0,
+    double_faults INT DEFAULT 0,
+    first_serve_percentage DECIMAL(5,2) DEFAULT 0,
+    break_points_won INT DEFAULT 0,
+    break_points_faced INT DEFAULT 0,
+    net_points_won INT DEFAULT 0,
+    breaks_conceded INT DEFAULT 0,
+    total_points_won INT DEFAULT 0,
+    winners INT DEFAULT 0,
+    unforced_errors INT DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
+
+-- Table: scoring_rules
+CREATE TABLE scoring_rules (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    stat_name TEXT UNIQUE NOT NULL,
+    points_per_unit DECIMAL(10,2) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Insert default scoring rules
+INSERT INTO scoring_rules (stat_name, points_per_unit, description) VALUES
+    ('win', 50, 'Punkte für einen Match-Sieg'),
+    ('loss', 0, 'Punkte für eine Match-Niederlage'),
+    ('ace', 10, 'Punkte pro Ass'),
+    ('double_fault', -5, 'Punkte pro Doppelfehler'),
+    ('break_point_won', 15, 'Punkte pro gewonnenem Break Point'),
+    ('net_points_won', 8, 'Punkte pro gewonnenem Netzpunkt'),
+    ('breaks_conceded', -8, 'Punkte pro kassiertem Break'),
+    ('winner', 5, 'Punkte pro Winner'),
+    ('unforced_error', -3, 'Punkte pro unforced Error');
+
+-- RLS for scoring_rules
+ALTER TABLE scoring_rules ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Everyone can view scoring rules" ON scoring_rules FOR SELECT USING (true);
+CREATE POLICY "Service role can manage scoring rules" ON scoring_rules FOR ALL USING (auth.role() = 'service_role');
 
 -- Table: leagues
 CREATE TABLE leagues (
@@ -143,6 +182,7 @@ CREATE TABLE tournaments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT NOT NULL,
     start_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    status TEXT DEFAULT 'upcoming' CHECK (status IN ('upcoming', 'on-going', 'completed')),
     is_active BOOLEAN DEFAULT false,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
@@ -152,7 +192,8 @@ CREATE TABLE tournament_players (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tournament_id UUID REFERENCES tournaments(id) ON DELETE CASCADE,
     player_id UUID REFERENCES players(id) ON DELETE CASCADE,
-    appearance_probability TEXT NOT NULL CHECK (appearance_probability IN ('Garantiert', 'Sehr Wahrscheinlich', 'Wahrscheinlich', 'Riskant', 'Sehr Riskant')),
+    appearance_probability TEXT NOT NULL CHECK (appearance_probability IN ('Garantiert', 'Sehr Wahrscheinlich', 'Wahrscheinlich', 'Riskant', 'Sehr Riskant', 'Ausgeschlossen')),
+    market_value DECIMAL(10,2) DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     UNIQUE(tournament_id, player_id)
 );
@@ -218,6 +259,62 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER check_team_players_assignment
     BEFORE INSERT ON team_players
     FOR EACH ROW EXECUTE FUNCTION check_player_assignment();
+
+-- Function to calculate fantasy points based on match statistics and scoring rules
+CREATE OR REPLACE FUNCTION calculate_match_fantasy_points()
+RETURNS TRIGGER AS $$
+DECLARE
+    total_points DECIMAL(10,2) := 0;
+    win_points DECIMAL(10,2);
+    loss_points DECIMAL(10,2);
+    ace_points DECIMAL(10,2);
+    df_points DECIMAL(10,2);
+    bp_points DECIMAL(10,2);
+    npw_points DECIMAL(10,2);
+    breaks_conceded_points DECIMAL(10,2);
+    winner_points DECIMAL(10,2);
+    ue_points DECIMAL(10,2);
+BEGIN
+    -- Get scoring rules
+    SELECT COALESCE(points_per_unit, 0) INTO win_points FROM scoring_rules WHERE stat_name = 'win';
+    SELECT COALESCE(points_per_unit, 0) INTO loss_points FROM scoring_rules WHERE stat_name = 'loss';
+    SELECT COALESCE(points_per_unit, 0) INTO ace_points FROM scoring_rules WHERE stat_name = 'ace';
+    SELECT COALESCE(points_per_unit, 0) INTO df_points FROM scoring_rules WHERE stat_name = 'double_fault';
+    SELECT COALESCE(points_per_unit, 0) INTO bp_points FROM scoring_rules WHERE stat_name = 'break_point_won';
+    SELECT COALESCE(points_per_unit, 0) INTO npw_points FROM scoring_rules WHERE stat_name = 'net_points_won';
+    SELECT COALESCE(points_per_unit, 0) INTO breaks_conceded_points FROM scoring_rules WHERE stat_name = 'breaks_conceded';
+    SELECT COALESCE(points_per_unit, 0) INTO winner_points FROM scoring_rules WHERE stat_name = 'winner';
+    SELECT COALESCE(points_per_unit, 0) INTO ue_points FROM scoring_rules WHERE stat_name = 'unforced_error';
+    
+    -- Calculate base points from win/loss
+    IF NEW.match_result ILIKE '%won%' OR NEW.match_result ILIKE '%sieg%' THEN
+        total_points := win_points;
+    ELSE
+        total_points := loss_points;
+    END IF;
+    
+    -- Add points from statistics
+    total_points := total_points + 
+        (COALESCE(NEW.aces, 0) * ace_points) +
+        (COALESCE(NEW.double_faults, 0) * df_points) +
+        (COALESCE(NEW.break_points_won, 0) * bp_points) +
+        (COALESCE(NEW.net_points_won, 0) * npw_points) +
+        (COALESCE(NEW.breaks_conceded, 0) * breaks_conceded_points) +
+        (COALESCE(NEW.winners, 0) * winner_points) +
+        (COALESCE(NEW.unforced_errors, 0) * ue_points);
+    
+    NEW.fantasy_points := ROUND(total_points);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER calculate_fantasy_points_before_insert
+    BEFORE INSERT ON player_matches
+    FOR EACH ROW EXECUTE FUNCTION calculate_match_fantasy_points();
+
+CREATE TRIGGER calculate_fantasy_points_before_update
+    BEFORE UPDATE ON player_matches
+    FOR EACH ROW EXECUTE FUNCTION calculate_match_fantasy_points();
 
 -- Function to update player's fantasy average based on last 10 matches
 CREATE OR REPLACE FUNCTION update_player_fantasy_avg()

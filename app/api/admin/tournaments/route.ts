@@ -56,6 +56,7 @@ export async function POST(request: NextRequest) {
       name,
       start_date: new Date(startDate).toISOString(),
       is_active: false,
+      status: 'upcoming',
     })
     .select()
     .single()

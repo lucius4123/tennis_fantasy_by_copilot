@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient as createServerAuthClient } from '@/utils/supabase/server'
-import { createAdminClient, refillTransferMarketForActiveTournament } from '@/lib/transfer-market'
+import { createAdminClient, refillTransferMarketForActiveTournament, assignInitialTeamLineups } from '@/lib/transfer-market'
 
 function getAdminClient() {
   return createAdminClient()
@@ -21,14 +21,33 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
 
   const { id } = await context.params
   const body = await request.json()
-  const isActive = body?.is_active as boolean
+  const isActive = body?.is_active as boolean | undefined
+  const status = body?.status as string | undefined
 
-  if (typeof isActive !== 'boolean') {
-    return NextResponse.json({ error: 'is_active must be boolean' }, { status: 400 })
+  const updateData: any = {}
+  
+  if (isActive !== undefined) {
+    if (typeof isActive !== 'boolean') {
+      return NextResponse.json({ error: 'is_active must be boolean' }, { status: 400 })
+    }
+    updateData.is_active = isActive
+  }
+
+  if (status !== undefined) {
+    const validStatuses = ['upcoming', 'on-going', 'completed']
+    if (!validStatuses.includes(status)) {
+      return NextResponse.json({ error: 'status must be one of: upcoming, on-going, completed' }, { status: 400 })
+    }
+    updateData.status = status
+  }
+
+  if (Object.keys(updateData).length === 0) {
+    return NextResponse.json({ error: 'No valid fields to update' }, { status: 400 })
   }
 
   const supabase = getAdminClient()
-  if (isActive) {
+  
+  if (isActive === true) {
     // Ensure only one active tournament at a time.
     const { error: deactivateOthersError } = await supabase
       .from('tournaments')
@@ -41,7 +60,7 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
 
     const { error: activateError } = await supabase
       .from('tournaments')
-      .update({ is_active: true })
+      .update(updateData)
       .eq('id', id)
 
     if (activateError) {
@@ -64,6 +83,23 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       return NextResponse.json({ error: clearLineupsError.message, code: clearLineupsError.code }, { status: 500 })
     }
 
+    // Assign initial team players (8 players per team) BEFORE filling transfer market
+    let lineupSummary
+    try {
+      lineupSummary = await assignInitialTeamLineups(supabase, id)
+    } catch (assignError: any) {
+      // Roll back the tournament activation if lineup assignment fails
+      await supabase
+        .from('tournaments')
+        .update({ is_active: false })
+        .eq('id', id)
+      
+      return NextResponse.json({ 
+        error: assignError.message || 'Fehler beim Zuweisen der Spieler', 
+        details: 'Turnier konnte nicht aktiviert werden. Bitte weise ausreichend Spieler außerhalb der Top 20 dem Turnier zu.'
+      }, { status: 400 })
+    }
+
     const refillSummary = await refillTransferMarketForActiveTournament(supabase)
 
     const { data: tournament, error: tournamentError } = await supabase
@@ -76,12 +112,12 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       return NextResponse.json({ error: tournamentError.message, code: tournamentError.code }, { status: 500 })
     }
 
-    return NextResponse.json({ tournament, refillSummary })
+    return NextResponse.json({ tournament, refillSummary, lineupSummary })
   }
 
   const { data, error } = await supabase
     .from('tournaments')
-    .update({ is_active: false })
+    .update(updateData)
     .eq('id', id)
     .select()
     .single()

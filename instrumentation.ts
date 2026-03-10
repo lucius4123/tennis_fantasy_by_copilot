@@ -17,7 +17,7 @@ export async function register() {
     console.error('Transfer market maintenance startup run failed:', error)
   }
 
-  // Every hour keep active auctions at target size (5 per league).
+  // Every minute resolve ended auctions and keep active offers at target size.
   setInterval(async () => {
     try {
       const supabase = createAdminClient()
@@ -25,5 +25,5 @@ export async function register() {
     } catch (error) {
       console.error('Transfer market maintenance hourly run failed:', error)
     }
-  }, 60 * 60 * 1000)
+  }, 60 * 1000)
 }

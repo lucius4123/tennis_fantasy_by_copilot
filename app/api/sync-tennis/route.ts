@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 
 // Helper function to fetch players from RapidAPI
 async function fetchPlayersFromAPI() {
-  const url = 'https://tennis-api-atp-wta-itf.p.rapidapi.com/tennis/v2/atp/player/' // Limit kann eingestellt werden (Anzahl der Zugriffe)
+  const url = 'https://tennis-api-atp-wta-itf.p.rapidapi.com/tennis/v2/atp/ranking/singles/'
   const options = {
     method: 'GET',
     headers: {
@@ -45,33 +45,48 @@ export async function GET(request: Request) {
     // 2. Fetch data from RapidAPI
     const apiData = await fetchPlayersFromAPI()
     
-    // Assuming the API returns an array of players in a 'data' property or directly as an array
-    // We need to adapt this based on the actual API response structure.
-    // Let's assume it returns { data: [...] } or just [...]
-    let allPlayers = Array.isArray(apiData) ? apiData : (apiData.data || [])
+    // Ranking endpoint response structure: { data: [{ position, point, player: { id, name, ... } }] }
+    const allPlayers = Array.isArray(apiData) ? apiData : (apiData.data || [])
 
     if (!allPlayers || allPlayers.length === 0) {
       return NextResponse.json({ error: 'No players found from API' }, { status: 404 })
     }
 
-    // 3. Pick 10 random players
-    // Shuffle array and take first 10
-    // const shuffled = allPlayers.sort(() => 0.5 - Math.random())
-    // const selectedPlayers = shuffled.slice(0, 10)
+    // 3. Keep players with ATP singles ranking 1-200
+    const topPlayers = allPlayers.filter((p: any) => {
+      const rankingPosition = Number(p.position)
+      return Number.isFinite(rankingPosition) && rankingPosition > 0 && rankingPosition <= 200
+    })
 
-    // 4. Map API data to our Supabase schema
-    // Note: You might need to adjust the property names based on the actual RapidAPI response
+    if (topPlayers.length === 0) {
+      return NextResponse.json({ error: 'No players with ranking <= 200 found' }, { status: 404 })
+    }
+
+    // 4. Map ranking data to our Supabase schema
     const defaultImageUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`
-    const playersToUpsert = allPlayers.map((p: any) => ({
-      atp_id: p.id || p.player_id, // Adjust based on actual API
-      first_name: p.first_name || p.name?.split(' ')[0] || 'Unknown',
-      last_name: p.last_name || p.name?.split(' ').slice(1).join(' ') || 'Unknown',
-      ranking: p.ranking || p.rank || null,
-      points: p.points || 0,
-      country: p.country || p.nationality || null,
-      image_url: defaultImageUrl,
-      updated_at: new Date().toISOString()
-    }))
+    const playersToUpsert = topPlayers
+      .map((p: any) => {
+        const fullName = (p.player?.name || '').trim()
+        const nameParts = fullName.split(' ').filter(Boolean)
+        const firstName = nameParts[0] || 'Unknown'
+        const lastName = nameParts.slice(1).join(' ') || 'Unknown'
+
+        return {
+          atp_id: p.player?.id ?? null,
+          first_name: firstName,
+          last_name: lastName,
+          ranking: Number(p.position) || null,
+          points: Number(p.point) || 0,
+          country: p.player?.country?.name || p.player?.countryAcr || p.countryAcr || null,
+          image_url: defaultImageUrl,
+          updated_at: new Date().toISOString()
+        }
+      })
+      .filter((p: { atp_id: number | null }) => p.atp_id !== null)
+
+    if (playersToUpsert.length === 0) {
+      return NextResponse.json({ error: 'No valid players with player.id found in API response' }, { status: 404 })
+    }
 
     // 5. Upsert into Supabase
     // We use the service role key here to bypass RLS
@@ -95,7 +110,7 @@ export async function GET(request: Request) {
       .is('image_url', null)
 
     return NextResponse.json({ 
-      message: 'Successfully synced 10 players', 
+      message: `Successfully synced ${data.length} players with ATP ranking <= 200`, 
       count: data.length,
       players: data
     })

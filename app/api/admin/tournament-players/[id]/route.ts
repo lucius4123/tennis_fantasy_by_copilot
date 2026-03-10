@@ -25,16 +25,33 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   const { id } = await context.params
   const body = await request.json()
   const probability = body?.appearance_probability as string
+  const marketValue = body?.market_value as number | undefined
 
-  const validValues = ['Garantiert', 'Sehr Wahrscheinlich', 'Wahrscheinlich', 'Riskant', 'Sehr Riskant']
-  if (!validValues.includes(probability)) {
-    return NextResponse.json({ error: 'Invalid appearance_probability' }, { status: 400 })
+  const updateData: any = {}
+
+  if (probability !== undefined) {
+    const validValues = ['Garantiert', 'Sehr Wahrscheinlich', 'Wahrscheinlich', 'Riskant', 'Sehr Riskant', 'Ausgeschlossen']
+    if (!validValues.includes(probability)) {
+      return NextResponse.json({ error: 'Invalid appearance_probability' }, { status: 400 })
+    }
+    updateData.appearance_probability = probability
+  }
+
+  if (marketValue !== undefined) {
+    if (typeof marketValue !== 'number' || marketValue < 0) {
+      return NextResponse.json({ error: 'Invalid market_value. Must be a non-negative number' }, { status: 400 })
+    }
+    updateData.market_value = marketValue
+  }
+
+  if (Object.keys(updateData).length === 0) {
+    return NextResponse.json({ error: 'No valid fields to update' }, { status: 400 })
   }
 
   const supabase = getAdminClient()
   const { data, error } = await supabase
     .from('tournament_players')
-    .update({ appearance_probability: probability })
+    .update(updateData)
     .eq('id', id)
     .select()
     .single()
