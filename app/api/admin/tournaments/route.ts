@@ -44,9 +44,19 @@ export async function POST(request: NextRequest) {
   const body = await request.json()
   const name = body?.name as string
   const startDate = body?.startDate as string
+  const startBudget = body?.start_budget as number | undefined
+  const starterTeamTargetValue = body?.starter_team_target_value as number | undefined
 
   if (!name || !startDate) {
     return NextResponse.json({ error: 'name and startDate are required' }, { status: 400 })
+  }
+
+  if (startBudget !== undefined && (!Number.isFinite(startBudget) || startBudget < 0)) {
+    return NextResponse.json({ error: 'start_budget must be a non-negative number' }, { status: 400 })
+  }
+
+  if (starterTeamTargetValue !== undefined && (!Number.isFinite(starterTeamTargetValue) || starterTeamTargetValue < 0)) {
+    return NextResponse.json({ error: 'starter_team_target_value must be a non-negative number' }, { status: 400 })
   }
 
   const supabase = getAdminClient()
@@ -57,6 +67,8 @@ export async function POST(request: NextRequest) {
       start_date: new Date(startDate).toISOString(),
       is_active: false,
       status: 'upcoming',
+      start_budget: startBudget ?? 1000000,
+      starter_team_target_value: starterTeamTargetValue ?? 0,
     })
     .select()
     .single()

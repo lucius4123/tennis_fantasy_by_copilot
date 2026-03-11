@@ -10,6 +10,8 @@ interface Tournament {
   start_date: string
   is_active: boolean
   status: 'upcoming' | 'on-going' | 'completed'
+  start_budget: number
+  starter_team_target_value: number
 }
 
 interface SupabaseErrorLike {
@@ -113,6 +115,8 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true)
   const [newTournamentName, setNewTournamentName] = useState('')
   const [newTournamentDate, setNewTournamentDate] = useState('')
+  const [newTournamentStartBudget, setNewTournamentStartBudget] = useState(1000000)
+  const [newTournamentStarterTeamTargetValue, setNewTournamentStarterTeamTargetValue] = useState(0)
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -159,6 +163,8 @@ export default function AdminPage() {
       const normalized = (payload.tournaments || []).map((t: any) => ({
         ...t,
         is_active: Boolean(t.is_active),
+        start_budget: Number(t.start_budget ?? 1000000),
+        starter_team_target_value: Number(t.starter_team_target_value ?? 0),
       }))
       setTournaments(normalized)
       setOriginalTournaments(normalized)
@@ -201,17 +207,33 @@ export default function AdminPage() {
       return
     }
 
+    if (newTournamentStartBudget < 0 || newTournamentStarterTeamTargetValue < 0) {
+      alert('Startkapital und Starterteam-Zielwert müssen 0 oder größer sein')
+      return
+    }
+
     const tempTournament: Tournament = {
       id: `temp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       name: newTournamentName,
       start_date: new Date(newTournamentDate).toISOString(),
       is_active: false,
       status: 'upcoming',
+      start_budget: newTournamentStartBudget,
+      starter_team_target_value: newTournamentStarterTeamTargetValue,
     }
 
     setTournaments((prev) => [...prev, tempTournament])
     setNewTournamentName('')
     setNewTournamentDate('')
+    setNewTournamentStartBudget(1000000)
+    setNewTournamentStarterTeamTargetValue(0)
+    setHasUnsavedChanges(true)
+  }
+
+  const updateTournamentSettings = (tournamentId: string, updates: Partial<Tournament>) => {
+    setTournaments((prev) =>
+      prev.map((t) => (t.id === tournamentId ? { ...t, ...updates } : t))
+    )
     setHasUnsavedChanges(true)
   }
 
@@ -322,7 +344,12 @@ export default function AdminPage() {
         const response = await fetch('/api/admin/tournaments', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: tournament.name, startDate: tournament.start_date }),
+            body: JSON.stringify({
+              name: tournament.name,
+              startDate: tournament.start_date,
+              start_budget: tournament.start_budget,
+              starter_team_target_value: tournament.starter_team_target_value,
+            }),
         })
         const payload = await response.json()
         if (!response.ok) {
@@ -341,7 +368,12 @@ export default function AdminPage() {
       const changedTournaments = tournaments.filter((t) => {
         if (t.id.startsWith('temp-')) return false
         const original = originalTournaments.find((o) => o.id === t.id)
-        return original && (original.is_active !== t.is_active || original.status !== t.status)
+        return original && (
+          original.is_active !== t.is_active ||
+          original.status !== t.status ||
+          original.start_budget !== t.start_budget ||
+          original.starter_team_target_value !== t.starter_team_target_value
+        )
       })
 
       for (const tournament of changedTournaments) {
@@ -353,6 +385,12 @@ export default function AdminPage() {
         }
         if (original && original.status !== tournament.status) {
           updatePayload.status = tournament.status
+        }
+        if (original && original.start_budget !== tournament.start_budget) {
+          updatePayload.start_budget = tournament.start_budget
+        }
+        if (original && original.starter_team_target_value !== tournament.starter_team_target_value) {
+          updatePayload.starter_team_target_value = tournament.starter_team_target_value
         }
 
         const response = await fetch(`/api/admin/tournaments/${tournament.id}`, {
@@ -617,6 +655,10 @@ export default function AdminPage() {
     return <div className="min-h-screen bg-zinc-50 flex items-center justify-center">Loading...</div>
   }
 
+  const currentSelectedTournament = selectedTournament
+    ? tournaments.find((t) => t.id === selectedTournament.id) || selectedTournament
+    : null
+
   return (
     <div className="min-h-screen bg-zinc-50 py-10 px-4 sm:px-6 lg:px-8">
       <div className="max-w-7xl mx-auto">
@@ -712,6 +754,24 @@ export default function AdminPage() {
                   onChange={(e) => setNewTournamentDate(e.target.value)}
                   className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
                 />
+                <input
+                  type="number"
+                  min="0"
+                  step="1000"
+                  value={newTournamentStartBudget}
+                  onChange={(e) => setNewTournamentStartBudget(e.target.value === '' ? 0 : parseInt(e.target.value))}
+                  className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                  placeholder="Startkapital pro Manager"
+                />
+                <input
+                  type="number"
+                  min="0"
+                  step="100"
+                  value={newTournamentStarterTeamTargetValue}
+                  onChange={(e) => setNewTournamentStarterTeamTargetValue(e.target.value === '' ? 0 : parseInt(e.target.value))}
+                  className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                  placeholder="Zielwert Starterteam"
+                />
                 <button
                   onClick={createTournament}
                   className="w-full bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg font-medium flex items-center justify-center gap-2 transition-colors"
@@ -763,6 +823,9 @@ export default function AdminPage() {
                       <div className="flex-1">
                         <h3 className="font-semibold text-zinc-900">{tournament.name}</h3>
                         <p className="text-sm text-zinc-500">{new Date(tournament.start_date).toLocaleDateString('de-DE')}</p>
+                        <p className="text-xs text-zinc-500 mt-1">
+                          Startkapital: {tournament.start_budget.toLocaleString('de-DE')}€ · Starterteam-Ziel: {tournament.starter_team_target_value.toLocaleString('de-DE')}€
+                        </p>
                       </div>
                       <div className="flex items-center gap-2">
                         <select
@@ -810,8 +873,39 @@ export default function AdminPage() {
           </div>
 
           <div className="space-y-6">
-            {selectedTournament ? (
+            {currentSelectedTournament ? (
               <>
+                <div className="bg-white shadow-sm rounded-2xl border border-zinc-200 p-6">
+                  <h2 className="text-lg font-semibold text-zinc-900 mb-4">Turnier-Einstellungen</h2>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-zinc-700 mb-1">Startkapital je Manager (€)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1000"
+                        value={currentSelectedTournament.start_budget}
+                        onChange={(e) => updateTournamentSettings(currentSelectedTournament.id, { start_budget: e.target.value === '' ? 0 : parseInt(e.target.value) })}
+                        className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-zinc-700 mb-1">Zielwert Starterteam (€)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="100"
+                        value={currentSelectedTournament.starter_team_target_value}
+                        onChange={(e) => updateTournamentSettings(currentSelectedTournament.id, { starter_team_target_value: e.target.value === '' ? 0 : parseInt(e.target.value) })}
+                        className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-zinc-500 mt-3">
+                    Beim Aktivieren des Turniers wird das Budget aller Teams auf das Startkapital gesetzt und die Starterteams werden auf den Zielwert angenähert verteilt.
+                  </p>
+                </div>
+
                 <div className="bg-white shadow-sm rounded-2xl border border-zinc-200 p-6">
                   <h2 className="text-lg font-semibold text-zinc-900 mb-4">Spieler hinzufügen</h2>
                   <div className="space-y-2 max-h-64 overflow-y-auto">

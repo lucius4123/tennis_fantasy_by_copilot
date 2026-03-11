@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import { isAdminUser } from '@/lib/auth'
 
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
@@ -35,13 +36,29 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser()
 
-  if (
-    !user &&
-    request.nextUrl.pathname.startsWith('/dashboard')
-  ) {
-    // no user, potentially respond by redirecting the user to the login page
+  const pathname = request.nextUrl.pathname
+  const isDashboardRoute = pathname.startsWith('/dashboard')
+  const isAdminPageRoute = pathname.startsWith('/admin')
+  const isAdminApiRoute = pathname.startsWith('/api/admin')
+  const requiresAuthenticatedUser = isDashboardRoute || isAdminPageRoute || isAdminApiRoute
+
+  if (!user && requiresAuthenticatedUser) {
+    if (isAdminApiRoute) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
     const url = request.nextUrl.clone()
     url.pathname = '/login'
+    return NextResponse.redirect(url)
+  }
+
+  if ((isAdminPageRoute || isAdminApiRoute) && !isAdminUser(user)) {
+    if (isAdminApiRoute) {
+      return NextResponse.json({ error: 'Forbidden: Admin role required' }, { status: 403 })
+    }
+
+    const url = request.nextUrl.clone()
+    url.pathname = '/dashboard'
     return NextResponse.redirect(url)
   }
 

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient as createServerAuthClient } from '@/utils/supabase/server'
-import { createAdminClient, refillTransferMarketForActiveTournament, assignInitialTeamLineups } from '@/lib/transfer-market'
+import { createAdminClient, refillTransferMarketForActiveTournament, assignInitialTeamLineups, resetAllTeamBudgets } from '@/lib/transfer-market'
 
 function getAdminClient() {
   return createAdminClient()
@@ -23,6 +23,8 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   const body = await request.json()
   const isActive = body?.is_active as boolean | undefined
   const status = body?.status as string | undefined
+  const startBudget = body?.start_budget as number | undefined
+  const starterTeamTargetValue = body?.starter_team_target_value as number | undefined
 
   const updateData: any = {}
   
@@ -39,6 +41,20 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       return NextResponse.json({ error: 'status must be one of: upcoming, on-going, completed' }, { status: 400 })
     }
     updateData.status = status
+  }
+
+  if (startBudget !== undefined) {
+    if (!Number.isFinite(startBudget) || startBudget < 0) {
+      return NextResponse.json({ error: 'start_budget must be a non-negative number' }, { status: 400 })
+    }
+    updateData.start_budget = startBudget
+  }
+
+  if (starterTeamTargetValue !== undefined) {
+    if (!Number.isFinite(starterTeamTargetValue) || starterTeamTargetValue < 0) {
+      return NextResponse.json({ error: 'starter_team_target_value must be a non-negative number' }, { status: 400 })
+    }
+    updateData.starter_team_target_value = starterTeamTargetValue
   }
 
   if (Object.keys(updateData).length === 0) {
@@ -58,10 +74,12 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       return NextResponse.json({ error: deactivateOthersError.message, code: deactivateOthersError.code }, { status: 500 })
     }
 
-    const { error: activateError } = await supabase
+    const { data: activatedTournament, error: activateError } = await supabase
       .from('tournaments')
       .update(updateData)
       .eq('id', id)
+      .select('*')
+      .single()
 
     if (activateError) {
       return NextResponse.json({ error: activateError.message, code: activateError.code }, { status: 500 })
@@ -83,10 +101,25 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       return NextResponse.json({ error: clearLineupsError.message, code: clearLineupsError.code }, { status: 500 })
     }
 
+    const { error: clearRotationError } = await supabase.from('market_player_rotation').delete().not('league_id', 'is', null)
+    if (clearRotationError) {
+      return NextResponse.json({ error: clearRotationError.message, code: clearRotationError.code }, { status: 500 })
+    }
+
+    try {
+      await resetAllTeamBudgets(supabase, Number(activatedTournament?.start_budget ?? 1000000))
+    } catch (budgetError: any) {
+      return NextResponse.json({ error: budgetError.message || 'Fehler beim Zurücksetzen des Startbudgets' }, { status: 500 })
+    }
+
     // Assign initial team players (8 players per team) BEFORE filling transfer market
     let lineupSummary
     try {
-      lineupSummary = await assignInitialTeamLineups(supabase, id)
+      lineupSummary = await assignInitialTeamLineups(
+        supabase,
+        id,
+        Number(activatedTournament?.starter_team_target_value ?? 0)
+      )
     } catch (assignError: any) {
       // Roll back the tournament activation if lineup assignment fails
       await supabase

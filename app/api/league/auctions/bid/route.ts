@@ -41,7 +41,7 @@ export async function POST(request: Request) {
     const nowIso = new Date().toISOString()
     const { data: auction, error: auctionError } = await supabase
       .from('market_auctions')
-      .select('id, end_time, player_id')
+      .select('id, end_time, player_id, seller_team_id')
       .eq('id', auctionId)
       .eq('league_id', leagueId)
       .single()
@@ -52,6 +52,10 @@ export async function POST(request: Request) {
 
     if (auction.end_time <= nowIso) {
       return NextResponse.json({ error: 'Auction has already ended' }, { status: 400 })
+    }
+
+    if (auction.seller_team_id && auction.seller_team_id === team.id) {
+      return NextResponse.json({ error: 'Du kannst nicht auf dein eigenes Angebot bieten' }, { status: 400 })
     }
 
     // Get the market value for the player in the active tournament

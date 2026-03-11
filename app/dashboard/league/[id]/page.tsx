@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { createClient } from '@/utils/supabase/client';
 import { useParams } from 'next/navigation';
 
@@ -15,6 +15,9 @@ interface Auction {
   id: string;
   player_id: string;
   end_time: string;
+  seller_team_id?: string | null;
+  highest_bidder_id?: string | null;
+  highest_bid?: number;
   player: { first_name: string; last_name: string; ranking: number; country: string; image_url?: string };
   appearance_probability?: string;
   market_value?: number;
@@ -94,6 +97,17 @@ export default function LeaguePage() {
   const [myBudget, setMyBudget] = useState<number | null>(null);
   const [teamInspection, setTeamInspection] = useState<TeamInspection | null>(null);
   const [teamInspectionLoading, setTeamInspectionLoading] = useState(false);
+  const [playerToSell, setPlayerToSell] = useState<Player | null>(null);
+  const [showSaleModal, setShowSaleModal] = useState(false);
+  const [sellLoading, setSellLoading] = useState(false);
+  const [playerMarketValues, setPlayerMarketValues] = useState<Map<string, number>>(new Map());
+  const [isLineupEditMode, setIsLineupEditMode] = useState(false);
+  const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
+  const [selectedFromSlot, setSelectedFromSlot] = useState<number | null>(null);
+  const [isTouchDragActive, setIsTouchDragActive] = useState(false);
+  const courtContainerRef = useRef<HTMLDivElement | null>(null);
+  const touchDragTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const touchStartPointRef = useRef<{ x: number; y: number } | null>(null);
 
   // Helper function to get icon for appearance probability
   const getProbabilityIcon = (probability?: string) => {
@@ -174,6 +188,26 @@ export default function LeaguePage() {
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (!isLineupEditMode) return;
+    courtContainerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [isLineupEditMode]);
+
+  useEffect(() => {
+    if (!isLineupEditMode || activeTab !== 'tournaments') return;
+
+    const previousOverflow = document.body.style.overflow;
+    const previousOverscrollBehavior = document.body.style.overscrollBehavior;
+
+    document.body.style.overflow = 'hidden';
+    document.body.style.overscrollBehavior = 'none';
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.body.style.overscrollBehavior = previousOverscrollBehavior;
+    };
+  }, [isLineupEditMode, activeTab]);
+
   const loadLeaderboard = async () => {
     const { data } = await supabase
       .from('fantasy_teams')
@@ -246,7 +280,9 @@ const loadAuctions = async () => {
     .select(`
       id, 
       player_id, 
-      highest_bid, 
+      highest_bid,
+      highest_bidder_id,
+      seller_team_id,
       end_time, 
       player:players(first_name, last_name, ranking, country, image_url)
     `)
@@ -273,8 +309,12 @@ const loadAuctions = async () => {
       market_value: probabilityMap.get(auction.player_id)?.market_value || 0
     }));
 
+    const sortedData = [...formattedData].sort(
+      (left: any, right: any) => new Date(left.end_time).getTime() - new Date(right.end_time).getTime()
+    );
+
     if (myTeamId) {
-      const auctionIds = formattedData.map((a: any) => a.id);
+      const auctionIds = sortedData.map((a: any) => a.id);
       const { data: myBids } = await supabase
         .from('market_bids')
         .select('auction_id, bid_amount')
@@ -282,11 +322,11 @@ const loadAuctions = async () => {
         .in('auction_id', auctionIds);
 
       const myBidMap = new Map((myBids || []).map((bid: any) => [bid.auction_id, bid.bid_amount]));
-      setAuctions(formattedData.map((auction: any) => ({ ...auction, my_bid: myBidMap.get(auction.id) })));
+      setAuctions(sortedData.map((auction: any) => ({ ...auction, my_bid: myBidMap.get(auction.id) })));
       return;
     }
     
-    setAuctions(formattedData);
+    setAuctions(sortedData);
   }
 };
 
@@ -364,6 +404,86 @@ const loadAuctions = async () => {
     console.log('Loading team for myTeamId:', myTeamId);
     const playersWithProbability = await loadTeamPlayers(myTeamId);
     setMyTeam(playersWithProbability);
+
+    // Load market values for all players
+    const playerIds = playersWithProbability.map((p: Player) => p.id);
+    const { data: marketData } = await supabase
+      .from('tournament_players')
+      .select('player_id, market_value')
+      .eq('tournament_id', activeTournamentId)
+      .in('player_id', playerIds);
+
+    const marketMap = new Map((marketData || []).map(m => [m.player_id, m.market_value]));
+    setPlayerMarketValues(marketMap);
+  };
+
+  const offerPlayerForSale = async (player: Player) => {
+    if (!myTeamId || !leagueId) return;
+
+    setSellLoading(true);
+    try {
+      const response = await fetch('/api/league/player-sales/offer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playerId: player.id, leagueId, daysUntilExpiration: 7 }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        alert(payload?.error || 'Spieler konnte nicht angeboten werden');
+        return;
+      }
+
+      alert(`${player.first_name} ${player.last_name} wurde auf dem Transfermarkt angeboten!`);
+      await loadMyTeam();
+      await loadAuctions();
+      setPlayerToSell(null);
+      setShowSaleModal(false);
+    } catch (error) {
+      console.error('Error offering player for sale:', error);
+      alert('Ein Fehler ist aufgetreten beim Anbieten des Spielers');
+    } finally {
+      setSellLoading(false);
+    }
+  };
+
+  const sellPlayerToMarket = async (player: Player) => {
+    if (!myTeamId || !leagueId) return;
+
+    setSellLoading(true);
+    try {
+      const response = await fetch('/api/league/player-sales/sell-to-market', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playerId: player.id, leagueId }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        alert(payload?.error || 'Spieler konnte nicht verkauft werden');
+        return;
+      }
+
+      const marketValue = playerMarketValues.get(player.id) || 0;
+      alert(`${player.first_name} ${player.last_name} wurde für ${marketValue.toLocaleString('de-DE')}€ verkauft!`);
+      await loadMyTeam();
+      
+      // Refresh budget
+      const { data: updatedTeam } = await supabase
+        .from('fantasy_teams')
+        .select('budget')
+        .eq('id', myTeamId)
+        .single();
+      if (updatedTeam?.budget != null) setMyBudget(updatedTeam.budget);
+
+      setPlayerToSell(null);
+      setShowSaleModal(false);
+    } catch (error) {
+      console.error('Error selling player to market:', error);
+      alert('Ein Fehler ist aufgetreten beim Verkaufen des Spielers');
+    } finally {
+      setSellLoading(false);
+    }
   };
 
   const loadTournaments = async () => {
@@ -397,6 +517,11 @@ const loadAuctions = async () => {
       alert('Bitte ein gültiges Gebot eingeben.');
       return;
     }
+    const auction = auctions.find(a => a.id === auctionId);
+    if (auction?.seller_team_id === myTeamId) {
+      alert('Du kannst nicht auf deine eigenen angebotenen Spieler bieten.');
+      return;
+    }
     const otherBidsTotal = auctions
       .filter(a => a.id !== auctionId)
       .reduce((sum, a) => sum + (a.my_bid || 0), 0);
@@ -425,6 +550,36 @@ const loadAuctions = async () => {
     if (updatedTeam?.budget != null) setMyBudget(updatedTeam.budget);
 
     await loadAuctions();
+  };
+
+  const acceptHighestBid = async (auctionId: string) => {
+    if (!myTeamId) return;
+
+    const response = await fetch('/api/league/player-sales/accept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auctionId, leagueId }),
+    });
+
+    const payload = await response.json();
+    if (!response.ok) {
+      alert(payload?.error || 'Gebot konnte nicht angenommen werden');
+      return;
+    }
+
+    alert(`Gebot angenommen: ${Number(payload?.winningAmount || 0).toLocaleString('de-DE')}€`);
+
+    const { data: updatedTeam } = await supabase
+      .from('fantasy_teams')
+      .select('budget')
+      .eq('id', myTeamId)
+      .single();
+
+    if (updatedTeam?.budget != null) setMyBudget(updatedTeam.budget);
+
+    await loadAuctions();
+    await loadMyTeam();
+    await loadNews();
   };
 
   const getRemainingTime = (endTime: string) => {
@@ -498,29 +653,141 @@ const loadAuctions = async () => {
     await saveLineup(nextSlots);
   };
 
+  const closeLineupEditMode = () => {
+    if (touchDragTimerRef.current) {
+      clearTimeout(touchDragTimerRef.current);
+      touchDragTimerRef.current = null;
+    }
+    touchStartPointRef.current = null;
+    setIsLineupEditMode(false);
+    setDraggedPlayerId(null);
+    setDraggedFromSlot(null);
+    setSelectedPlayerId(null);
+    setSelectedFromSlot(null);
+    setIsTouchDragActive(false);
+  };
+
+  const startTouchDragCandidate = (playerId: string, fromSlot: number | null, e: React.TouchEvent) => {
+    if (!isLineupEditMode) return;
+
+    const touch = e.touches[0];
+    if (!touch) return;
+
+    if (touchDragTimerRef.current) {
+      clearTimeout(touchDragTimerRef.current);
+      touchDragTimerRef.current = null;
+    }
+
+    touchStartPointRef.current = { x: touch.clientX, y: touch.clientY };
+    touchDragTimerRef.current = setTimeout(() => {
+      setDraggedPlayerId(playerId);
+      setDraggedFromSlot(fromSlot);
+      setSelectedPlayerId(playerId);
+      setSelectedFromSlot(fromSlot);
+      setIsTouchDragActive(true);
+    }, 10);
+  };
+
+  const handleTouchMoveForDrag = (e: React.TouchEvent) => {
+    if (!isLineupEditMode) return;
+
+    const touch = e.touches[0];
+    const start = touchStartPointRef.current;
+    if (!touch || !start) return;
+
+    if (!isTouchDragActive) {
+      const deltaX = Math.abs(touch.clientX - start.x);
+      const deltaY = Math.abs(touch.clientY - start.y);
+      if (deltaX > 10 || deltaY > 10) {
+        if (touchDragTimerRef.current) {
+          clearTimeout(touchDragTimerRef.current);
+          touchDragTimerRef.current = null;
+        }
+      }
+      return;
+    }
+
+    e.preventDefault();
+  };
+
+  const handleTouchCancelDrag = () => {
+    if (touchDragTimerRef.current) {
+      clearTimeout(touchDragTimerRef.current);
+      touchDragTimerRef.current = null;
+    }
+    touchStartPointRef.current = null;
+    setIsTouchDragActive(false);
+    setDraggedPlayerId(null);
+    setDraggedFromSlot(null);
+  };
+
+  const endTouchDrag = async (e: React.TouchEvent) => {
+    if (touchDragTimerRef.current) {
+      clearTimeout(touchDragTimerRef.current);
+      touchDragTimerRef.current = null;
+    }
+
+    const wasTouchDragging = isTouchDragActive;
+    setIsTouchDragActive(false);
+    touchStartPointRef.current = null;
+
+    if (!wasTouchDragging || !draggedPlayerId) return;
+
+    const touch = e.changedTouches[0];
+    if (!touch) return;
+
+    const target = document.elementFromPoint(touch.clientX, touch.clientY) as HTMLElement | null;
+    const slotTarget = target?.closest('[data-lineup-slot-index]') as HTMLElement | null;
+    if (slotTarget) {
+      const slotIndex = Number(slotTarget.dataset.lineupSlotIndex);
+      if (Number.isFinite(slotIndex)) {
+        await handleDropOnSlot(slotIndex);
+        return;
+      }
+    }
+
+    const benchTarget = target?.closest('[data-lineup-bench]');
+    if (benchTarget) {
+      await handleDropOnBench();
+      return;
+    }
+
+    setDraggedPlayerId(null);
+    setDraggedFromSlot(null);
+  };
+
   const handleDragStartFromBench = (playerId: string) => {
+    if (!isLineupEditMode) return;
     setDraggedPlayerId(playerId);
     setDraggedFromSlot(null);
   };
 
   const handleDragStartFromSlot = (slotIndex: number) => {
+    if (!isLineupEditMode) return;
     const player = lineupSlots[slotIndex];
     if (!player) return;
     setDraggedPlayerId(player.id);
     setDraggedFromSlot(slotIndex);
   };
 
-  const handleDropOnSlot = async (slotIndex: number) => {
-    if (!draggedPlayerId) return;
+  const handleDropOnSlot = async (
+    slotIndex: number,
+    override?: { playerId: string; fromSlot: number | null }
+  ) => {
+    if (!isLineupEditMode) return;
+
+    const activeDraggedPlayerId = override?.playerId ?? draggedPlayerId;
+    const activeDraggedFromSlot = override?.fromSlot ?? draggedFromSlot;
+    if (!activeDraggedPlayerId) return;
 
     const nextSlots = [...lineupSlots];
     let movingPlayer: Player | null = null;
 
-    if (draggedFromSlot !== null) {
-      movingPlayer = nextSlots[draggedFromSlot];
+    if (activeDraggedFromSlot !== null) {
+      movingPlayer = nextSlots[activeDraggedFromSlot];
       if (!movingPlayer) return;
 
-      if (draggedFromSlot === slotIndex) {
+      if (activeDraggedFromSlot === slotIndex) {
         setDraggedPlayerId(null);
         setDraggedFromSlot(null);
         return;
@@ -528,9 +795,9 @@ const loadAuctions = async () => {
 
       const targetPlayer = nextSlots[slotIndex];
       nextSlots[slotIndex] = movingPlayer;
-      nextSlots[draggedFromSlot] = targetPlayer || null;
+      nextSlots[activeDraggedFromSlot] = targetPlayer || null;
     } else {
-      movingPlayer = myTeam.find((player) => player.id === draggedPlayerId) || null;
+      movingPlayer = myTeam.find((player) => player.id === activeDraggedPlayerId) || null;
       if (!movingPlayer) return;
 
       const existingIndex = nextSlots.findIndex((player) => player?.id === movingPlayer?.id);
@@ -544,16 +811,47 @@ const loadAuctions = async () => {
     await applyLineupUpdate(nextSlots);
     setDraggedPlayerId(null);
     setDraggedFromSlot(null);
+    setSelectedPlayerId(null);
+    setSelectedFromSlot(null);
   };
 
-  const handleDropOnBench = async () => {
-    if (draggedFromSlot === null) return;
+  const handleDropOnBench = async (overrideFromSlot?: number | null) => {
+    if (!isLineupEditMode) return;
+
+    const sourceSlot = overrideFromSlot ?? draggedFromSlot;
+    if (sourceSlot === null || sourceSlot === undefined) return;
 
     const nextSlots = [...lineupSlots];
-    nextSlots[draggedFromSlot] = null;
+    nextSlots[sourceSlot] = null;
     await applyLineupUpdate(nextSlots);
     setDraggedPlayerId(null);
     setDraggedFromSlot(null);
+    setSelectedPlayerId(null);
+    setSelectedFromSlot(null);
+  };
+
+  const handleBenchPlayerTap = (playerId: string) => {
+    if (!isLineupEditMode) return;
+    setSelectedPlayerId(playerId);
+    setSelectedFromSlot(null);
+  };
+
+  const handleSlotPlayerTap = (slotIndex: number) => {
+    if (!isLineupEditMode) return;
+    const player = lineupSlots[slotIndex];
+    if (!player) return;
+    setSelectedPlayerId(player.id);
+    setSelectedFromSlot(slotIndex);
+  };
+
+  const handleSlotTapForPlacement = async (slotIndex: number) => {
+    if (!isLineupEditMode || !selectedPlayerId) return;
+    await handleDropOnSlot(slotIndex, { playerId: selectedPlayerId, fromSlot: selectedFromSlot });
+  };
+
+  const handleBenchTapForPlacement = async () => {
+    if (!isLineupEditMode || selectedFromSlot === null) return;
+    await handleDropOnBench(selectedFromSlot);
   };
 
   const openPlayerHistory = async (player: Player) => {
@@ -622,20 +920,22 @@ const loadAuctions = async () => {
   ];
 
   return (
-    <div className="p-6 max-w-4xl mx-auto">
+    <div className="dark-surface-scope min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 p-6 max-w-4xl mx-auto">
       <h1 className="text-3xl font-bold mb-6">Liga</h1>
 
       {/* tabs */}
-      <nav className="flex space-x-6 mb-8 border-b border-zinc-200">
-        {['leaderboard','auctions','myteam','tournaments','news'].map(tab => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`pb-2 text-sm font-medium transition-colors ${activeTab === tab ? 'border-b-2 border-emerald-600 text-emerald-600' : 'text-zinc-600 hover:text-zinc-900'}`}
-          >
-            {tab === 'leaderboard' ? 'Rangliste' : tab === 'auctions' ? 'Transfermarkt' : tab === 'myteam' ? 'Mein Team' : tab === 'tournaments' ? 'Turniere & Aufstellung' : 'News'}
-          </button>
-        ))}
+      <nav className="mb-8 border-b border-zinc-200 dark:border-zinc-800 overflow-x-auto">
+        <div className="grid grid-flow-col auto-cols-fr gap-2 min-w-[640px]">
+          {['leaderboard','auctions','myteam','tournaments','news'].map(tab => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`w-full pb-2 text-sm font-medium transition-colors whitespace-nowrap ${activeTab === tab ? 'border-b-2 border-emerald-600 text-emerald-600' : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100'}`}
+            >
+              {tab === 'leaderboard' ? 'Rangliste' : tab === 'auctions' ? 'Transfermarkt' : tab === 'myteam' ? 'Mein Team' : tab === 'tournaments' ? 'Turniere & Aufstellung' : 'News'}
+            </button>
+          ))}
+        </div>
       </nav>
 
       {activeTab === 'leaderboard' && (
@@ -665,6 +965,14 @@ const loadAuctions = async () => {
               </li>
             ))}
           </ul>
+          <div className="mt-4 flex justify-end">
+            <button
+              onClick={() => window.location.assign('/dashboard')}
+              className="px-4 py-2 rounded-xl bg-zinc-900 text-white text-sm font-medium hover:bg-zinc-800 transition-colors"
+            >
+              Zurueck zum Dashboard
+            </button>
+          </div>
         </div>
       )}
 
@@ -695,10 +1003,12 @@ const loadAuctions = async () => {
             {auctions.map(auction => {
               const probInfo = getProbabilityIcon(auction.appearance_probability);
               const remaining = getRemainingTime(auction.end_time);
+              const isOwnSale = auction.seller_team_id === myTeamId;
+              const isPlayerSale = !!auction.seller_team_id;
               return (
                 <li
                   key={auction.id}
-                  className="p-4 bg-white rounded-xl shadow-sm border border-zinc-100"
+                  className={`p-4 rounded-xl shadow-sm border ${isOwnSale ? 'bg-orange-50 border-orange-200' : 'bg-white border-zinc-100'}`}
                 >
                   <div className="flex justify-between mb-2">
                     <button
@@ -724,6 +1034,12 @@ const loadAuctions = async () => {
                       >
                         {probInfo.icon}
                       </span>
+                      {isOwnSale && (
+                        <span className="text-xs px-2 py-1 rounded-md bg-orange-100 text-orange-700 font-medium">Dein Angebot</span>
+                      )}
+                      {isPlayerSale && !isOwnSale && (
+                        <span className="text-xs px-2 py-1 rounded-md bg-blue-100 text-blue-700 font-medium">Manager-Angebot</span>
+                      )}
                     </button>
                     <div className="flex items-center gap-4">
                       <span className="text-zinc-500">Ranking: {auction.player.ranking}</span>
@@ -742,29 +1058,44 @@ const loadAuctions = async () => {
                         </button>
                       </div>
                     ) : (
-                      <span className="text-zinc-500 text-sm">Noch kein eigenes Gebot</span>
+                      <span className="text-zinc-500 text-sm">{isOwnSale ? 'Dein Spieler - Du kannst nicht bieten' : 'Noch kein eigenes Gebot'}</span>
                     )}
                     <span className={`text-sm px-2 py-1 rounded-md ${remaining.urgent ? 'bg-red-100 text-red-700 font-semibold' : 'text-zinc-600 bg-zinc-100'}`}>
                       Restlaufzeit: {remaining.label}
                     </span>
                   </div>
-                  <div className="mt-3 flex items-center space-x-2">
-                    <input
-                      type="number"
-                      id={`bid-${auction.id}`}
-                      className="w-24 px-2 py-1 border rounded"
-                      placeholder="Gebot"
-                    />
-                    <button
-                      onClick={() => {
-                        const bid = parseInt((document.getElementById(`bid-${auction.id}`) as HTMLInputElement).value);
-                        placeBid(auction.id, bid);
-                      }}
-                      className="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1 rounded"
-                    >
-                      Bieten
-                    </button>
+                  <div className="mt-2 text-sm text-zinc-600">
+                    Höchstgebot: <span className="font-semibold text-zinc-900">{Number(auction.highest_bid || 0).toLocaleString('de-DE')}€</span>
                   </div>
+                  {isOwnSale && !!auction.highest_bidder_id && Number(auction.highest_bid || 0) > 0 && (
+                    <div className="mt-3">
+                      <button
+                        onClick={() => acceptHighestBid(auction.id)}
+                        className="text-xs px-3 py-1.5 rounded-md border border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+                      >
+                        Hoechstes Gebot annehmen
+                      </button>
+                    </div>
+                  )}
+                  {!isOwnSale && (
+                    <div className="mt-3 flex items-center space-x-2">
+                      <input
+                        type="number"
+                        id={`bid-${auction.id}`}
+                        className="w-24 px-2 py-1 border rounded"
+                        placeholder="Gebot"
+                      />
+                      <button
+                        onClick={() => {
+                          const bid = parseInt((document.getElementById(`bid-${auction.id}`) as HTMLInputElement).value);
+                          placeBid(auction.id, bid);
+                        }}
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1 rounded"
+                      >
+                        Bieten
+                      </button>
+                    </div>
+                  )}
                 </li>
               );
             })}
@@ -778,19 +1109,20 @@ const loadAuctions = async () => {
           <ul className="space-y-2">
             {myTeam.map(player => {
               const probInfo = getProbabilityIcon(player.appearance_probability);
+              const marketValue = playerMarketValues.get(player.id) || 0;
               return (
                 <li
                   key={player.id}
-                  className="flex justify-between p-3 bg-white rounded-xl shadow-sm border border-zinc-100"
+                  className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-3 bg-white rounded-xl shadow-sm border border-zinc-100"
                 >
                   <button
                     onClick={() => openPlayerHistory(player)}
-                    className="flex items-center gap-2 text-left hover:opacity-80"
+                    className="flex items-center gap-2 text-left hover:opacity-80 min-w-0"
                   >
                     <img
                       src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                       alt={`${player.first_name} ${player.last_name}`}
-                      className="w-8 h-8 rounded-full object-cover"
+                      className="w-8 h-8 rounded-full object-cover shrink-0"
                     />
                     <span className="underline decoration-zinc-300">{player.first_name} {player.last_name}</span>
                     <span 
@@ -800,9 +1132,21 @@ const loadAuctions = async () => {
                       {probInfo.icon}
                     </span>
                   </button>
-                  <div className="flex items-center gap-2">
-                    <span className="text-emerald-600 font-semibold">{playerTournamentPoints.get(player.id) || 0} Pkt</span>
-                    <span className="text-zinc-500">#{player.ranking} – {player.country}</span>
+                  <div className="flex items-center justify-between gap-3 sm:justify-end">
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="text-emerald-600 font-semibold">{playerTournamentPoints.get(player.id) || 0} Pkt</span>
+                      <span className="text-zinc-500">#{player.ranking}</span>
+                      <span className="text-emerald-600 font-semibold">{marketValue}€</span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setPlayerToSell(player);
+                        setShowSaleModal(true);
+                      }}
+                      className="text-xs px-2 py-1 rounded-md border border-orange-200 text-orange-600 hover:bg-orange-50 whitespace-nowrap"
+                    >
+                      Verkaufen
+                    </button>
                   </div>
                 </li>
               );
@@ -812,8 +1156,23 @@ const loadAuctions = async () => {
       )}
 
       {activeTab === 'tournaments' && (
-        <div>
-          <h2 className="text-xl font-semibold mb-4">Turniere & Aufstellung</h2>
+        <div className={isLineupEditMode ? 'pb-48 sm:pb-40' : ''}>
+          {isLineupEditMode && (
+            <button
+              onClick={closeLineupEditMode}
+              className="fixed top-6 left-6 z-[70] w-10 h-10 rounded-full border border-zinc-300 bg-white text-zinc-700 shadow-md hover:bg-zinc-50"
+              title="Bearbeitungsmodus verlassen"
+              aria-label="Bearbeitungsmodus verlassen"
+            >
+              ↩
+            </button>
+          )}
+
+          {!isLineupEditMode && (
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-semibold">Turniere &amp; Aufstellung</h2>
+            </div>
+          )}
 
           {!activeTournament ? (
             <div className="p-4 bg-white rounded-xl shadow-sm border border-zinc-100 text-zinc-500">
@@ -823,7 +1182,7 @@ const loadAuctions = async () => {
             <>
               {(() => {
                 const lineupDeadline = getLineupDeadlineRemaining(activeTournament.start_date);
-                return (
+                return !isLineupEditMode ? (
               <div className="p-4 bg-white rounded-xl shadow-sm border border-zinc-100 mb-4">
                 <div className="flex justify-between items-center mb-2">
                   <div className="flex items-center gap-2">
@@ -848,11 +1207,24 @@ const loadAuctions = async () => {
                 </div>
                 <p className="text-sm text-zinc-500">Ziehe bis zu 5 Spieler in das Feld. Aufgestellte Spieler zaehlen direkt fuer deine Fantasy-Punkte.</p>
               </div>
-                );
+                ) : null;
               })()}
 
-              <div className="bg-sky-300 rounded-2xl p-4 sm:p-6 shadow-md mb-5 border border-sky-200">
-                <div className="relative rounded-xl h-[420px] sm:h-[480px] border-4 border-white overflow-hidden">
+              <div
+                ref={courtContainerRef}
+                className={`bg-sky-300 rounded-2xl p-4 sm:p-6 shadow-md mb-5 border border-sky-200 ${!isLineupEditMode ? 'cursor-pointer' : ''}`}
+                onClick={() => {
+                  if (!isLineupEditMode) {
+                    setIsLineupEditMode(true);
+                  }
+                }}
+              >
+                {!isLineupEditMode && (
+                  <div className="mb-3 text-sm font-medium text-sky-900 bg-white/80 border border-white rounded-lg px-3 py-2">
+                    Tippe auf das Feld, um den Bearbeitungsmodus zu aktivieren.
+                  </div>
+                )}
+                <div className={`relative rounded-xl h-[420px] sm:h-[480px] border-4 border-white overflow-hidden ${isLineupEditMode ? 'touch-none' : ''}`}>
                   <div className="absolute inset-x-0 top-1/2 border-t-4 border-white" />
                   <div className="absolute top-0 bottom-0 left-[14%] border-l-4 border-white" />
                   <div className="absolute top-0 bottom-0 right-[14%] border-r-4 border-white" />
@@ -877,13 +1249,26 @@ const loadAuctions = async () => {
                         className={`absolute ${positions[slotIndex]} w-28 sm:w-32`}
                         onDragOver={(e) => e.preventDefault()}
                         onDrop={() => handleDropOnSlot(slotIndex)}
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          await handleSlotTapForPlacement(slotIndex);
+                        }}
+                        data-lineup-slot-index={slotIndex}
                       >
                         <div className="rounded-xl border-2 border-dashed border-white/70 bg-white/90 min-h-20 p-2 text-center">
                           {player ? (
                             <div
-                              draggable
+                              draggable={isLineupEditMode}
                               onDragStart={() => handleDragStartFromSlot(slotIndex)}
-                              className="cursor-grab active:cursor-grabbing"
+                              onTouchStart={(e) => startTouchDragCandidate(player.id, slotIndex, e)}
+                              onTouchMove={handleTouchMoveForDrag}
+                              onTouchEnd={endTouchDrag}
+                              onTouchCancel={handleTouchCancelDrag}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleSlotPlayerTap(slotIndex);
+                              }}
+                              className={`cursor-grab active:cursor-grabbing ${selectedFromSlot === slotIndex ? 'ring-2 ring-emerald-400 rounded-lg' : ''}`}
                               title={`${player.first_name} ${player.last_name}`}
                             >
                               <img
@@ -905,9 +1290,15 @@ const loadAuctions = async () => {
               </div>
 
               <div
-                className="bg-white rounded-2xl border border-zinc-100 p-4"
+                className={`bg-white rounded-2xl border border-zinc-100 p-4 ${isLineupEditMode ? 'touch-none hidden' : ''}`}
                 onDragOver={(e) => e.preventDefault()}
-                onDrop={handleDropOnBench}
+                onDrop={() => {
+                  void handleDropOnBench();
+                }}
+                onClick={async () => {
+                  await handleBenchTapForPlacement();
+                }}
+                data-lineup-bench
               >
                 <h3 className="font-semibold mb-3">Nicht-Aufgestellt</h3>
                 {notInLineupPlayers.length === 0 ? (
@@ -919,9 +1310,17 @@ const loadAuctions = async () => {
                       return (
                         <div
                           key={player.id}
-                          draggable
+                          draggable={isLineupEditMode}
                           onDragStart={() => handleDragStartFromBench(player.id)}
-                          className="cursor-grab active:cursor-grabbing p-3 rounded-xl border border-zinc-200 hover:border-emerald-300 bg-zinc-50"
+                          onTouchStart={(e) => startTouchDragCandidate(player.id, null, e)}
+                          onTouchMove={handleTouchMoveForDrag}
+                          onTouchEnd={endTouchDrag}
+                          onTouchCancel={handleTouchCancelDrag}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleBenchPlayerTap(player.id);
+                          }}
+                          className={`cursor-grab active:cursor-grabbing p-3 rounded-xl border hover:border-emerald-300 bg-zinc-50 ${selectedPlayerId === player.id && selectedFromSlot === null ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-zinc-200'}`}
                         >
                           <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
@@ -941,6 +1340,64 @@ const loadAuctions = async () => {
                   </div>
                 )}
               </div>
+
+              {isLineupEditMode && (
+                <div
+                  className="fixed bottom-0 left-0 right-0 z-50 border-t border-zinc-200 bg-white/95 backdrop-blur p-3 sm:p-4 shadow-[0_-8px_24px_rgba(0,0,0,0.15)]"
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={() => {
+                    void handleDropOnBench();
+                  }}
+                  onClick={async () => {
+                    await handleBenchTapForPlacement();
+                  }}
+                  data-lineup-bench
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="font-semibold text-sm sm:text-base">Nicht-Aufgestellt</h3>
+                    <span className="text-xs text-zinc-500">Immer sichtbar im Bearbeitungsmodus</span>
+                  </div>
+
+                  {notInLineupPlayers.length === 0 ? (
+                    <p className="text-sm text-zinc-500">Alle verfuegbaren Spieler sind aktuell aufgestellt.</p>
+                  ) : (
+                    <div className="flex gap-2 overflow-x-auto pb-1 touch-pan-x">
+                      {notInLineupPlayers.map((player) => {
+                        const probInfo = getProbabilityIcon(player.appearance_probability);
+                        return (
+                          <div
+                            key={`edit-tray-${player.id}`}
+                            draggable={isLineupEditMode}
+                            onDragStart={() => handleDragStartFromBench(player.id)}
+                            onTouchStart={(e) => startTouchDragCandidate(player.id, null, e)}
+                            onTouchMove={handleTouchMoveForDrag}
+                            onTouchEnd={endTouchDrag}
+                            onTouchCancel={handleTouchCancelDrag}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleBenchPlayerTap(player.id);
+                            }}
+                            className={`min-w-[180px] cursor-grab active:cursor-grabbing p-2.5 rounded-xl border hover:border-emerald-300 bg-zinc-50 ${selectedPlayerId === player.id && selectedFromSlot === null ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-zinc-200'}`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <img
+                                  src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
+                                  alt={`${player.first_name} ${player.last_name}`}
+                                  className="w-8 h-8 rounded-full object-cover"
+                                />
+                                <span className="font-medium text-zinc-900 truncate text-sm">{player.first_name} {player.last_name}</span>
+                              </div>
+                              <span className={`text-base ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
+                            </div>
+                            <p className="text-xs text-zinc-500 mt-1">#{player.ranking} - {player.country}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>
@@ -1151,6 +1608,66 @@ const loadAuctions = async () => {
                 </section>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {playerToSell && showSaleModal && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">
+                {playerToSell.first_name} {playerToSell.last_name} verkaufen
+              </h3>
+              <button
+                onClick={() => {
+                  setPlayerToSell(null);
+                  setShowSaleModal(false);
+                }}
+                className="px-3 py-1 rounded-lg border border-zinc-300 hover:bg-zinc-50"
+              >
+                Schliessen
+              </button>
+            </div>
+
+            <div className="mb-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
+              <p className="text-sm text-blue-800">
+                <span className="font-semibold">Marktwert:</span> {playerMarketValues.get(playerToSell.id) || 0}€
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <button
+                onClick={() => sellPlayerToMarket(playerToSell)}
+                disabled={sellLoading}
+                className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-400 text-white px-4 py-3 rounded-lg font-medium transition"
+              >
+                {sellLoading ? 'Wird verkauft...' : 'Direkt für Marktwert verkaufen'}
+              </button>
+              <button
+                onClick={() => offerPlayerForSale(playerToSell)}
+                disabled={sellLoading}
+                className="w-full bg-orange-600 hover:bg-orange-700 disabled:bg-gray-400 text-white px-4 py-3 rounded-lg font-medium transition"
+              >
+                {sellLoading ? 'Wird angeboten...' : 'Auf Transfermarkt anbieten'}
+              </button>
+              <button
+                onClick={() => {
+                  setPlayerToSell(null);
+                  setShowSaleModal(false);
+                }}
+                disabled={sellLoading}
+                className="w-full bg-zinc-200 hover:bg-zinc-300 disabled:bg-gray-400 text-zinc-900 px-4 py-3 rounded-lg font-medium transition"
+              >
+                Abbrechen
+              </button>
+            </div>
+
+            <p className="text-xs text-zinc-500 mt-4 text-center">
+              Bei "Direkt verkaufen" erhältst Du sofort den Marktwert und der Spieler wird vom Markt aufgenommen.
+              <br />
+              Bei "Anbieten" können andere Manager Gebote abgeben, Du kannst aber auch jederzeit zum Marktwert verkaufen.
+            </p>
           </div>
         </div>
       )}

@@ -177,6 +177,25 @@ CREATE POLICY "Users can create auctions in their leagues" ON market_auctions FO
 );
 CREATE POLICY "Service role can manage market_auctions" ON market_auctions FOR ALL USING (auth.role() = 'service_role');
 
+-- Table: market_player_rotation
+CREATE TABLE market_player_rotation (
+    league_id UUID REFERENCES leagues(id) ON DELETE CASCADE,
+    player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+    seen_in_cycle BOOLEAN NOT NULL DEFAULT false,
+    last_shown_at TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY (league_id, player_id)
+);
+
+CREATE INDEX idx_market_player_rotation_league_seen
+    ON market_player_rotation (league_id, seen_in_cycle);
+
+-- RLS for market_player_rotation
+ALTER TABLE market_player_rotation ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users can view rotation in their leagues" ON market_player_rotation FOR SELECT USING (
+    EXISTS (SELECT 1 FROM user_leagues WHERE user_leagues.league_id = market_player_rotation.league_id AND user_leagues.user_id = auth.uid())
+);
+CREATE POLICY "Service role can manage market_player_rotation" ON market_player_rotation FOR ALL USING (auth.role() = 'service_role');
+
 -- Table: tournaments
 CREATE TABLE tournaments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -184,6 +203,8 @@ CREATE TABLE tournaments (
     start_date TIMESTAMP WITH TIME ZONE NOT NULL,
     status TEXT DEFAULT 'upcoming' CHECK (status IN ('upcoming', 'on-going', 'completed')),
     is_active BOOLEAN DEFAULT false,
+    start_budget INT DEFAULT 1000000,
+    starter_team_target_value INT DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 

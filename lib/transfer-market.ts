@@ -2,6 +2,11 @@ import { createClient as createSupabaseClient } from '@supabase/supabase-js'
 
 type AdminClient = any
 
+type EligibleStarterPlayer = {
+  playerId: string
+  marketValue: number
+}
+
 function randomInt(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min
 }
@@ -22,6 +27,126 @@ function getRandomAuctionEndTime() {
   return end.toISOString()
 }
 
+function sumMarketValue(players: EligibleStarterPlayer[]) {
+  return players.reduce((sum, player) => sum + player.marketValue, 0)
+}
+
+function pickStarterTeamForTarget(
+  availablePlayers: EligibleStarterPlayer[],
+  teamSize: number,
+  targetValue: number
+) {
+  if (availablePlayers.length <= teamSize) {
+    return availablePlayers.slice(0, teamSize)
+  }
+
+  if (targetValue <= 0) {
+    return pickRandomItems(availablePlayers, teamSize)
+  }
+
+  let bestTeam = pickRandomItems(availablePlayers, teamSize)
+  let bestDiff = Math.abs(sumMarketValue(bestTeam) - targetValue)
+
+  const sortedAscending = [...availablePlayers].sort((a, b) => a.marketValue - b.marketValue)
+  const sortedDescending = [...sortedAscending].reverse()
+  const midpoint = Math.max(0, Math.floor(sortedAscending.length / 2) - Math.floor(teamSize / 2))
+  const deterministicCandidates = [
+    sortedAscending.slice(0, teamSize),
+    sortedDescending.slice(0, teamSize),
+    sortedAscending.slice(midpoint, midpoint + teamSize),
+  ].filter((team) => team.length === teamSize)
+
+  for (const candidate of deterministicCandidates) {
+    const diff = Math.abs(sumMarketValue(candidate) - targetValue)
+    if (diff < bestDiff) {
+      bestTeam = candidate
+      bestDiff = diff
+    }
+  }
+
+  const iterations = Math.min(750, Math.max(200, availablePlayers.length * 8))
+  for (let i = 0; i < iterations; i++) {
+    const candidate = pickRandomItems(availablePlayers, teamSize)
+    const diff = Math.abs(sumMarketValue(candidate) - targetValue)
+
+    if (diff < bestDiff) {
+      bestTeam = candidate
+      bestDiff = diff
+
+      if (bestDiff === 0) break
+    }
+  }
+
+  return bestTeam
+}
+
+async function pickPlayersForLeagueCycle(
+  supabase: AdminClient,
+  leagueId: string,
+  candidatePlayerIds: string[],
+  needed: number,
+  shownAtIso: string
+) {
+  if (needed <= 0 || candidatePlayerIds.length === 0) return [] as string[]
+
+  const { data: rotationRows, error: rotationError } = await supabase
+    .from('market_player_rotation')
+    .select('player_id, seen_in_cycle')
+    .eq('league_id', leagueId)
+    .in('player_id', candidatePlayerIds)
+
+  if (rotationError) throw rotationError
+
+  const seenMap = new Map<string, boolean>()
+  for (const row of rotationRows || []) {
+    seenMap.set(row.player_id as string, Boolean(row.seen_in_cycle))
+  }
+
+  const unseenCandidates = candidatePlayerIds.filter((playerId) => !seenMap.get(playerId))
+
+  let selectedPlayers: string[] = []
+
+  if (unseenCandidates.length >= needed) {
+    selectedPlayers = pickRandomItems(unseenCandidates, needed)
+  } else {
+    selectedPlayers = pickRandomItems(unseenCandidates, unseenCandidates.length)
+
+    if (candidatePlayerIds.length > 0) {
+      const { error: resetError } = await supabase
+        .from('market_player_rotation')
+        .update({ seen_in_cycle: false })
+        .eq('league_id', leagueId)
+        .in('player_id', candidatePlayerIds)
+
+      if (resetError) throw resetError
+    }
+
+    const remainingNeeded = needed - selectedPlayers.length
+    if (remainingNeeded > 0) {
+      const remainingPool = candidatePlayerIds.filter((playerId) => !selectedPlayers.includes(playerId))
+      const topUp = pickRandomItems(remainingPool, Math.min(remainingNeeded, remainingPool.length))
+      selectedPlayers = [...selectedPlayers, ...topUp]
+    }
+  }
+
+  if (selectedPlayers.length > 0) {
+    const rotationUpserts = selectedPlayers.map((playerId) => ({
+      league_id: leagueId,
+      player_id: playerId,
+      seen_in_cycle: true,
+      last_shown_at: shownAtIso,
+    }))
+
+    const { error: upsertError } = await supabase
+      .from('market_player_rotation')
+      .upsert(rotationUpserts, { onConflict: 'league_id,player_id' })
+
+    if (upsertError) throw upsertError
+  }
+
+  return selectedPlayers
+}
+
 export function createAdminClient(): AdminClient {
   return createSupabaseClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -29,12 +154,28 @@ export function createAdminClient(): AdminClient {
   ) as any
 }
 
-export async function assignInitialTeamLineups(supabase: AdminClient, tournamentId: string) {
+export async function resetAllTeamBudgets(supabase: AdminClient, startBudget: number) {
+  const { error } = await supabase
+    .from('fantasy_teams')
+    .update({ budget: startBudget })
+    .not('id', 'is', null)
+
+  if (error) {
+    throw new Error(`Failed to reset team budgets: ${error.message}`)
+  }
+}
+
+export async function assignInitialTeamLineups(
+  supabase: AdminClient,
+  tournamentId: string,
+  starterTeamTargetValue = 0
+) {
   // Step 1: Get all players for this tournament with ranking > 20 (outside top 20)
   const { data: tournamentPlayers, error: tpError } = await supabase
     .from('tournament_players')
     .select(`
       player_id,
+      market_value,
       players!inner (
         id,
         ranking
@@ -47,14 +188,17 @@ export async function assignInitialTeamLineups(supabase: AdminClient, tournament
   }
 
   // Filter to only include players with ranking > 20 or null ranking
-  const eligiblePlayerIds = (tournamentPlayers || [])
+  const eligiblePlayers = (tournamentPlayers || [])
     .filter((tp: any) => {
       const ranking = tp.players?.ranking
       return ranking === null || ranking > 20
     })
-    .map((tp: any) => tp.player_id as string)
+    .map((tp: any) => ({
+      playerId: tp.player_id as string,
+      marketValue: Number(tp.market_value || 0),
+    }))
 
-  if (eligiblePlayerIds.length === 0) {
+  if (eligiblePlayers.length === 0) {
     throw new Error('Keine Spieler außerhalb der Top 20 sind diesem Turnier zugewiesen.')
   }
 
@@ -71,35 +215,37 @@ export async function assignInitialTeamLineups(supabase: AdminClient, tournament
   const requiredPlayers = teams.length * 8
 
   // Step 3: Validate we have enough players
-  if (eligiblePlayerIds.length < requiredPlayers) {
+  if (eligiblePlayers.length < requiredPlayers) {
     throw new Error(
       `Nicht genügend Spieler verfügbar. Benötigt: ${requiredPlayers} (${teams.length} Teams × 8 Spieler), ` +
-      `Verfügbar: ${eligiblePlayerIds.length}. Bitte weise mehr Spieler außerhalb der Top 20 diesem Turnier zu.`
+      `Verfügbar: ${eligiblePlayers.length}. Bitte weise mehr Spieler außerhalb der Top 20 diesem Turnier zu.`
     )
   }
 
-  // Step 4: Shuffle all eligible players
-  const shuffledPlayers = [...eligiblePlayerIds]
-  for (let i = shuffledPlayers.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1))
-    ;[shuffledPlayers[i], shuffledPlayers[j]] = [shuffledPlayers[j], shuffledPlayers[i]]
-  }
-
-  // Step 5: Assign 8 players to each team
+  // Step 4: Assign 8 players to each team while approximating the desired starter team value.
   const teamPlayerRows: Array<{ team_id: string; player_id: string }> = []
-  let playerIndex = 0
+  // Zeile 227 ändern zu:
+  const remainingPlayers = pickRandomItems<EligibleStarterPlayer>(eligiblePlayers, eligiblePlayers.length);
+  const normalizedTarget = Math.max(0, Number(starterTeamTargetValue || 0))
+  let totalAssignedStarterValue = 0
 
   for (const team of teams) {
-    for (let i = 0; i < 8; i++) {
+    const selectedPlayers = pickStarterTeamForTarget(remainingPlayers, 8, normalizedTarget)
+    const selectedPlayerIds = new Set(selectedPlayers.map((player) => player.playerId))
+
+    for (const player of selectedPlayers) {
       teamPlayerRows.push({
         team_id: team.id,
-        player_id: shuffledPlayers[playerIndex]
+        player_id: player.playerId
       })
-      playerIndex++
+      totalAssignedStarterValue += player.marketValue
     }
+
+    const nextRemainingPlayers = remainingPlayers.filter((player) => !selectedPlayerIds.has(player.playerId))
+    remainingPlayers.splice(0, remainingPlayers.length, ...nextRemainingPlayers)
   }
 
-  // Step 6: Insert all players into team_players
+  // Step 5: Insert all players into team_players
   const { error: insertError } = await supabase
     .from('team_players')
     .insert(teamPlayerRows)
@@ -111,14 +257,16 @@ export async function assignInitialTeamLineups(supabase: AdminClient, tournament
   return {
     teamsProcessed: teams.length,
     playersAssigned: teamPlayerRows.length,
-    eligiblePlayers: eligiblePlayerIds.length
+    eligiblePlayers: eligiblePlayers.length,
+    starterTeamTargetValue: normalizedTarget,
+    averageStarterTeamValue: teams.length > 0 ? Math.round(totalAssignedStarterValue / teams.length) : 0,
   }
 }
 
 async function resolveExpiredAuctionsForLeague(supabase: AdminClient, leagueId: string, nowIso: string) {
   const { data: expiredAuctions, error: expiredError } = await supabase
     .from('market_auctions')
-    .select('id, player_id, highest_bidder_id, highest_bid')
+    .select('id, player_id, highest_bidder_id, highest_bid, seller_team_id')
     .eq('league_id', leagueId)
     .lte('end_time', nowIso)
 
@@ -151,12 +299,33 @@ async function resolveExpiredAuctionsForLeague(supabase: AdminClient, leagueId: 
     const winnerBid = bids?.[0] || null
     const winnerTeamId = winnerBid?.team_id || auction.highest_bidder_id || null
     const winningAmount = Number(winnerBid?.bid_amount || auction.highest_bid || 0)
+    const isPlayerSale = !!auction.seller_team_id
 
     // Remove bids + auction first so DB trigger allows assigning player to team.
     await supabase.from('market_bids').delete().eq('auction_id', auction.id)
     await supabase.from('market_auctions').delete().eq('id', auction.id)
 
-    if (winnerTeamId) {
+    // If no winner and this is a player sale, return player to seller
+    if (!winnerTeamId && isPlayerSale && auction.seller_team_id) {
+      const { error: returnError } = await supabase
+        .from('team_players')
+        .upsert(
+          { team_id: auction.seller_team_id, player_id: auction.player_id },
+          { onConflict: 'team_id,player_id', ignoreDuplicates: true }
+        )
+
+      if (returnError) throw returnError
+
+      const playerName = playerNameMap.get(auction.player_id) || 'Spieler'
+      await supabase
+        .from('league_news')
+        .insert([{
+          league_id: leagueId,
+          team_id: auction.seller_team_id,
+          title: 'Auktion abgelaufen',
+          message: `${playerName} wurde nicht verkauft und ist zurück in deinem Team.`,
+        }])
+    } else if (winnerTeamId) {
       const { error: assignError } = await supabase
         .from('team_players')
         .upsert(
@@ -165,6 +334,40 @@ async function resolveExpiredAuctionsForLeague(supabase: AdminClient, leagueId: 
         )
 
       if (assignError) throw assignError
+
+      // If this is a player sale, remove player from seller team
+      if (isPlayerSale && auction.seller_team_id && auction.seller_team_id !== winnerTeamId) {
+        await supabase
+          .from('team_players')
+          .delete()
+          .eq('team_id', auction.seller_team_id)
+          .eq('player_id', auction.player_id)
+
+        // Add seller to news if bidder is different
+        const { data: sellerTeam } = await supabase
+          .from('fantasy_teams')
+          .select('id, name')
+          .eq('id', auction.seller_team_id)
+          .single()
+
+        if (sellerTeam && winnerTeamId !== auction.seller_team_id) {
+          const { data: winnerTeam } = await supabase
+            .from('fantasy_teams')
+            .select('id, name')
+            .eq('id', winnerTeamId)
+            .single()
+
+          const playerName = playerNameMap.get(auction.player_id) || 'Spieler'
+          await supabase
+            .from('league_news')
+            .insert([{
+              league_id: leagueId,
+              team_id: auction.seller_team_id,
+              title: 'Spieler verkauft',
+              message: `${playerName} wurde an ${winnerTeam?.name || 'Team'} verkauft.`,
+            }])
+        }
+      }
 
       if (winningAmount > 0) {
         const { data: winnerTeam } = await supabase
@@ -179,6 +382,38 @@ async function resolveExpiredAuctionsForLeague(supabase: AdminClient, leagueId: 
             .from('fantasy_teams')
             .update({ budget: nextBudget })
             .eq('id', winnerTeamId)
+
+          // For player sales, add seller budget increase
+          if (isPlayerSale && auction.seller_team_id && auction.seller_team_id !== winnerTeamId) {
+            const { data: sellerTeam } = await supabase
+              .from('fantasy_teams')
+              .select('id, budget')
+              .eq('id', auction.seller_team_id)
+              .single()
+
+            if (sellerTeam) {
+              const sellerNewBudget = Number(sellerTeam.budget || 0) + winningAmount
+              await supabase
+                .from('fantasy_teams')
+                .update({ budget: sellerNewBudget })
+                .eq('id', auction.seller_team_id)
+            }
+          }
+
+          // Record in sales history if player sale
+          if (isPlayerSale) {
+            await supabase
+              .from('player_sales_history')
+              .insert({
+                auction_id: auction.id,
+                seller_team_id: auction.seller_team_id || null,
+                buyer_team_id: winnerTeamId,
+                player_id: auction.player_id,
+                league_id: leagueId,
+                sale_price: winningAmount,
+                sale_type: 'auction_win',
+              })
+          }
 
           const loserTeamIds: string[] = Array.from(
             new Set((bids || []).map((b: any) => b.team_id as string).filter((teamId: string) => teamId !== winnerTeamId))
@@ -228,12 +463,18 @@ export async function refillTransferMarketForActiveTournament(supabase: AdminCli
 
   const { data: tournamentPlayers, error: tpError } = await supabase
     .from('tournament_players')
-    .select('player_id')
+    .select('player_id, appearance_probability')
     .in('tournament_id', tournamentIds)
 
   if (tpError) throw tpError
 
-  const activeTournamentPlayerIds = Array.from(new Set((tournamentPlayers || []).map((tp: any) => tp.player_id as string)))
+  const activeTournamentPlayerIds = Array.from(
+    new Set(
+      (tournamentPlayers || [])
+        .filter((tp: any) => tp.appearance_probability !== 'Ausgeschlossen')
+        .map((tp: any) => tp.player_id as string)
+    )
+  )
 
   if (activeTournamentPlayerIds.length === 0) {
     await supabase.from('market_auctions').delete().gt('end_time', nowIso)
@@ -289,7 +530,10 @@ export async function refillTransferMarketForActiveTournament(supabase: AdminCli
     const needed = Math.min(5 - activeCount, candidates.length)
     if (needed <= 0) continue
 
-    const selectedPlayers = pickRandomItems(candidates, needed)
+    const selectedPlayers = await pickPlayersForLeagueCycle(supabase, league.id, candidates, needed, nowIso)
+
+    if (selectedPlayers.length === 0) continue
+
     const auctionRows = selectedPlayers.map((playerId) => ({
       league_id: league.id,
       player_id: playerId,

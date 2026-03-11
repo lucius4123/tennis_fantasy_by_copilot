@@ -124,11 +124,11 @@ export default function PlayersPage() {
   }
 
   if (loading) {
-    return <div className="min-h-screen bg-zinc-50 py-10 px-4 sm:px-6 lg:px-8 flex items-center justify-center">Loading...</div>
+    return <div className="dark-surface-scope min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 py-10 px-4 sm:px-6 lg:px-8 flex items-center justify-center">Loading...</div>
   }
 
   return (
-    <div className="min-h-screen bg-zinc-50 py-10 px-4 sm:px-6 lg:px-8">
+    <div className="dark-surface-scope min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 py-10 px-4 sm:px-6 lg:px-8">
       <div className="max-w-7xl mx-auto">
         <div className="mb-8 flex items-center justify-between">
           <div className="flex items-center">
