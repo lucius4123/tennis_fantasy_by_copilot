@@ -65,9 +65,11 @@ export default async function DashboardPage() {
                 Admin Panel
               </Link>
             )}
-            <Link href="/players" className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors">
-              View Players
-            </Link>
+            {userIsAdmin && (
+              <Link href="/players" className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors">
+                View Players
+              </Link>
+            )}
           </div>
         </div>
 

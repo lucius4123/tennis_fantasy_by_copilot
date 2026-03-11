@@ -402,10 +402,10 @@ async function resolveExpiredAuctionsForLeague(supabase: AdminClient, leagueId: 
 
           // Record in sales history if player sale
           if (isPlayerSale) {
-            await supabase
+            const { error: historyError } = await supabase
               .from('player_sales_history')
               .insert({
-                auction_id: auction.id,
+                auction_id: null,
                 seller_team_id: auction.seller_team_id || null,
                 buyer_team_id: winnerTeamId,
                 player_id: auction.player_id,
@@ -413,6 +413,10 @@ async function resolveExpiredAuctionsForLeague(supabase: AdminClient, leagueId: 
                 sale_price: winningAmount,
                 sale_type: 'auction_win',
               })
+
+            if (historyError) {
+              console.error('Failed to insert player sales history:', historyError)
+            }
           }
 
           const loserTeamIds: string[] = Array.from(

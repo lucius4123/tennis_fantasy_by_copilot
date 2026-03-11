@@ -152,6 +152,7 @@ CREATE POLICY "Service role can manage team_players" ON team_players FOR ALL USI
 -- Add columns to fantasy_teams
 ALTER TABLE fantasy_teams ADD COLUMN total_points_scored INT DEFAULT 0;
 ALTER TABLE fantasy_teams ADD COLUMN budget INT DEFAULT 1000000;
+ALTER TABLE fantasy_teams ADD COLUMN profile_image_url TEXT;
 
 -- Table: market_auctions
 CREATE TABLE market_auctions (

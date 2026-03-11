@@ -9,6 +9,7 @@ interface FantasyTeam {
   name: string;
   total_points_scored: number;
   user_id: string;
+  profile_image_url?: string | null;
 }
 
 interface Auction {
@@ -22,6 +23,7 @@ interface Auction {
   appearance_probability?: string;
   market_value?: number;
   my_bid?: number;
+  seller_team_image_url?: string | null;
 }
 
 interface Player {
@@ -62,6 +64,18 @@ interface LeagueNews {
   title: string;
   message: string;
   created_at: string;
+  team_id?: string | null;
+  team_image_url?: string | null;
+}
+
+interface PlayerSalesHistoryEntry {
+  id: string;
+  seller_team_id: string | null;
+  buyer_team_id: string | null;
+  player_id: string;
+  sale_price: number;
+  sale_type: 'market_sale' | 'auction_win';
+  created_at: string;
 }
 
 interface TeamInspection {
@@ -92,6 +106,7 @@ export default function LeaguePage() {
   const [historyMatches, setHistoryMatches] = useState<PlayerMatch[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [news, setNews] = useState<LeagueNews[]>([]);
+  const [lastSeenNewsAt, setLastSeenNewsAt] = useState<string | null>(null);
   const [timeTick, setTimeTick] = useState(0);
   const [playerTournamentPoints, setPlayerTournamentPoints] = useState<Map<string, number>>(new Map());
   const [myBudget, setMyBudget] = useState<number | null>(null);
@@ -189,6 +204,20 @@ export default function LeaguePage() {
   }, []);
 
   useEffect(() => {
+    if (!leagueId) return;
+    const storageKey = `league-news-last-seen-${leagueId}`;
+    const storedValue = window.localStorage.getItem(storageKey);
+    setLastSeenNewsAt(storedValue);
+  }, [leagueId]);
+
+  useEffect(() => {
+    if (!leagueId || activeTab !== 'news') return;
+    const storageKey = `league-news-last-seen-${leagueId}`;
+    const nowIso = new Date().toISOString();
+    window.localStorage.setItem(storageKey, nowIso);
+  }, [leagueId, activeTab]);
+
+  useEffect(() => {
     if (!isLineupEditMode) return;
     courtContainerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }, [isLineupEditMode]);
@@ -211,7 +240,7 @@ export default function LeaguePage() {
   const loadLeaderboard = async () => {
     const { data } = await supabase
       .from('fantasy_teams')
-      .select('id, name, total_points_scored, user_id')
+      .select('id, name, total_points_scored, user_id, profile_image_url')
       .eq('league_id', leagueId)
       .order('total_points_scored', { ascending: false });
     setLeaderboard(data || []);
@@ -309,7 +338,32 @@ const loadAuctions = async () => {
       market_value: probabilityMap.get(auction.player_id)?.market_value || 0
     }));
 
-    const sortedData = [...formattedData].sort(
+    const sellerTeamIds = Array.from(
+      new Set(
+        formattedData
+          .map((auction: any) => auction.seller_team_id)
+          .filter((teamId: string | null | undefined): teamId is string => Boolean(teamId))
+      )
+    );
+
+    let sellerTeamImageMap = new Map<string, string | null>();
+    if (sellerTeamIds.length > 0) {
+      const { data: sellerTeams } = await supabase
+        .from('fantasy_teams')
+        .select('id, profile_image_url')
+        .in('id', sellerTeamIds);
+
+      sellerTeamImageMap = new Map(
+        (sellerTeams || []).map((team: any) => [team.id, team.profile_image_url || null])
+      );
+    }
+
+    const auctionsWithSellerImages = formattedData.map((auction: any) => ({
+      ...auction,
+      seller_team_image_url: auction.seller_team_id ? (sellerTeamImageMap.get(auction.seller_team_id) || null) : null,
+    }));
+
+    const sortedData = [...auctionsWithSellerImages].sort(
       (left: any, right: any) => new Date(left.end_time).getTime() - new Date(right.end_time).getTime()
     );
 
@@ -332,15 +386,134 @@ const loadAuctions = async () => {
 
   const loadNews = async () => {
     if (!leagueId) return;
-    const { data } = await supabase
+    const { data: baseNews } = await supabase
       .from('league_news')
-      .select('id, title, message, created_at')
+      .select('id, title, message, created_at, team_id')
       .eq('league_id', leagueId)
       .or(`team_id.is.null,team_id.eq.${myTeamId}`)
       .order('created_at', { ascending: false })
       .limit(50);
 
-    setNews((data as LeagueNews[]) || []);
+    const { data: salesRows } = await supabase
+      .from('player_sales_history')
+      .select('id, seller_team_id, buyer_team_id, player_id, sale_price, sale_type, created_at')
+      .eq('league_id', leagueId)
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    const sales = (salesRows as PlayerSalesHistoryEntry[]) || [];
+
+    const playerIds = Array.from(new Set(sales.map((row) => row.player_id)));
+    const salesTeamIds = sales
+      .flatMap((row) => [row.seller_team_id, row.buyer_team_id])
+      .filter((id): id is string => Boolean(id));
+    const baseNewsTeamIds = (((baseNews as LeagueNews[]) || []).map((entry) => entry.team_id || null))
+      .filter((id): id is string => Boolean(id));
+    const teamIds = Array.from(new Set([...salesTeamIds, ...baseNewsTeamIds]));
+
+    let playerNameById = new Map<string, string>();
+    if (playerIds.length > 0) {
+      const { data: players } = await supabase
+        .from('players')
+        .select('id, first_name, last_name')
+        .in('id', playerIds);
+
+      playerNameById = new Map(
+        (players || []).map((player: any) => [player.id, `${player.first_name} ${player.last_name}`])
+      );
+    }
+
+    let teamNameById = new Map<string, string>();
+    if (teamIds.length > 0) {
+      const { data: teams } = await supabase
+        .from('fantasy_teams')
+        .select('id, name, profile_image_url')
+        .in('id', teamIds);
+
+      teamNameById = new Map((teams || []).map((team: any) => [team.id, team.name]));
+      const teamImageById = new Map((teams || []).map((team: any) => [team.id, team.profile_image_url || null]));
+
+      const baseNewsWithImages = (((baseNews as LeagueNews[]) || []).map((entry) => ({
+        ...entry,
+        team_image_url: entry.team_id ? (teamImageById.get(entry.team_id) || null) : null,
+      })));
+
+      const salesAsNews: LeagueNews[] = sales.map((row) => {
+        const playerName = playerNameById.get(row.player_id) || 'Spieler';
+        const sellerName = row.seller_team_id ? (teamNameById.get(row.seller_team_id) || 'Team') : 'Markt';
+        const buyerName = row.buyer_team_id ? (teamNameById.get(row.buyer_team_id) || 'Team') : 'Markt';
+        const priceText = Number(row.sale_price || 0).toLocaleString('de-DE');
+        const sellerImage = row.seller_team_id ? (teamImageById.get(row.seller_team_id) || null) : null;
+
+        if (row.sale_type === 'market_sale') {
+          return {
+            id: `sale-${row.id}`,
+            title: 'Spieler an Markt verkauft',
+            message: `${sellerName} hat ${playerName} für ${priceText}€ an den Markt verkauft.`,
+            created_at: row.created_at,
+            team_id: row.seller_team_id,
+            team_image_url: sellerImage,
+          };
+        }
+
+        return {
+          id: `sale-${row.id}`,
+          title: 'Transfer abgeschlossen',
+          message: `${buyerName} hat ${playerName} von ${sellerName} für ${priceText}€ gekauft.`,
+          created_at: row.created_at,
+          team_id: row.seller_team_id,
+          team_image_url: sellerImage,
+        };
+      });
+
+      const mergedNews = [...baseNewsWithImages, ...salesAsNews]
+        .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+        .slice(0, 50);
+
+      setNews(mergedNews);
+      return;
+    }
+
+    setNews((baseNews as LeagueNews[]) || []);
+  };
+
+  const uploadTeamProfileImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !myTeamId) return;
+
+    if (file.size > 1024 * 1024) {
+      alert('Das Profilbild darf maximal 1MB groß sein.');
+      event.target.value = '';
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('teamId', myTeamId);
+    formData.append('leagueId', leagueId);
+
+    try {
+      const response = await fetch('/api/upload-team-image', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        alert(payload?.error || 'Profilbild konnte nicht hochgeladen werden.');
+        return;
+      }
+
+      await loadLeaderboard();
+      await loadAuctions();
+      await loadNews();
+      alert('Profilbild erfolgreich hochgeladen.');
+    } catch (error) {
+      console.error('Upload error:', error);
+      alert('Profilbild konnte nicht hochgeladen werden.');
+    } finally {
+      event.target.value = '';
+    }
   };
 
   const loadTeamPlayers = async (teamId: string) => {
@@ -582,6 +755,28 @@ const loadAuctions = async () => {
     await loadNews();
   };
 
+  const cancelPlayerSale = async (auctionId: string) => {
+    if (!myTeamId) return;
+
+    const response = await fetch('/api/league/player-sales/cancel', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auctionId, leagueId }),
+    });
+
+    const payload = await response.json();
+    if (!response.ok) {
+      alert(payload?.error || 'Angebot konnte nicht storniert werden');
+      return;
+    }
+
+    alert('Angebot wurde storniert. Der Spieler ist wieder in deinem Team.');
+
+    await loadAuctions();
+    await loadMyTeam();
+    await loadNews();
+  };
+
   const getRemainingTime = (endTime: string) => {
     void timeTick;
     const diffMs = new Date(endTime).getTime() - Date.now();
@@ -618,6 +813,11 @@ const loadAuctions = async () => {
 
     const hoursLeft = Math.ceil(diffMs / (60 * 60 * 1000));
     return { label: `${hoursLeft} Stunde${hoursLeft === 1 ? '' : 'n'}`, urgent: true };
+  };
+
+  const isNewsEntryNew = (createdAt: string) => {
+    if (!lastSeenNewsAt) return true;
+    return new Date(createdAt).getTime() > new Date(lastSeenNewsAt).getTime();
   };
 
   const saveLineup = async (nextSlots: LineupSlot[]) => {
@@ -945,10 +1145,21 @@ const loadAuctions = async () => {
             {leaderboard.map((team, index) => (
               <li key={team.id}>
                 <button
-                  onClick={() => openTeamInspection(team)}
-                  className={`w-full flex justify-between items-center p-3 rounded-xl shadow-sm border text-left transition hover:shadow-md ${team.id === myTeamId ? 'bg-emerald-50 border-emerald-200 hover:border-emerald-300' : 'bg-white border-zinc-100 hover:border-emerald-200'}`}
+                  onClick={() => {
+                    if (team.id !== myTeamId) {
+                      openTeamInspection(team)
+                    }
+                  }}
+                  className={`w-full flex justify-between items-center p-3 rounded-xl shadow-sm border text-left transition ${team.id === myTeamId ? 'bg-emerald-50 border-emerald-200 cursor-default' : 'bg-white border-zinc-100 hover:border-emerald-200 hover:shadow-md'}`}
                 >
                   <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-full overflow-hidden bg-zinc-200 border border-zinc-300 shrink-0 flex items-center justify-center">
+                      {team.profile_image_url ? (
+                        <img src={team.profile_image_url} alt={team.name} className="w-full h-full object-cover" />
+                      ) : (
+                        <span className="text-xs font-semibold text-zinc-600">{team.name?.charAt(0)?.toUpperCase() || '?'}</span>
+                      )}
+                    </div>
                     <span className={`w-6 text-sm font-semibold ${team.id === myTeamId ? 'text-emerald-600' : 'text-zinc-400'}`}>{index + 1}.</span>
                     <div>
                       <span className="block font-medium text-zinc-900">
@@ -960,7 +1171,20 @@ const loadAuctions = async () => {
                       </span>
                     </div>
                   </div>
-                  <span className="text-zinc-500">{team.total_points_scored} Punkte</span>
+                  <div className="flex items-center gap-3">
+                    {team.id === myTeamId && (
+                      <label className="text-xs px-2 py-1 rounded-md border border-emerald-300 text-emerald-700 hover:bg-emerald-50 cursor-pointer">
+                        Profilbild
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={uploadTeamProfileImage}
+                        />
+                      </label>
+                    )}
+                    <span className="text-zinc-500">{team.total_points_scored} Punkte</span>
+                  </div>
                 </button>
               </li>
             ))}
@@ -1025,7 +1249,7 @@ const loadAuctions = async () => {
                       <img
                         src={auction.player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                         alt={`${auction.player.first_name} ${auction.player.last_name}`}
-                        className="w-8 h-8 rounded-full object-cover"
+                        className="w-10 h-10 rounded-full object-cover"
                       />
                       <span className="font-medium underline decoration-zinc-300">{auction.player.first_name} {auction.player.last_name}</span>
                       <span 
@@ -1034,11 +1258,15 @@ const loadAuctions = async () => {
                       >
                         {probInfo.icon}
                       </span>
+                      {isPlayerSale && auction.seller_team_image_url && (
+                        <img
+                          src={auction.seller_team_image_url}
+                          alt="Manager"
+                          className="w-7 h-7 rounded-full object-cover border border-zinc-300"
+                        />
+                      )}
                       {isOwnSale && (
                         <span className="text-xs px-2 py-1 rounded-md bg-orange-100 text-orange-700 font-medium">Dein Angebot</span>
-                      )}
-                      {isPlayerSale && !isOwnSale && (
-                        <span className="text-xs px-2 py-1 rounded-md bg-blue-100 text-blue-700 font-medium">Manager-Angebot</span>
                       )}
                     </button>
                     <div className="flex items-center gap-4">
@@ -1057,16 +1285,20 @@ const loadAuctions = async () => {
                           Zurückziehen
                         </button>
                       </div>
+                    ) : isOwnSale ? (
+                      <span className="text-zinc-500 text-sm">Dein Spieler - Du kannst nicht bieten</span>
                     ) : (
-                      <span className="text-zinc-500 text-sm">{isOwnSale ? 'Dein Spieler - Du kannst nicht bieten' : 'Noch kein eigenes Gebot'}</span>
+                      <span />
                     )}
                     <span className={`text-sm px-2 py-1 rounded-md ${remaining.urgent ? 'bg-red-100 text-red-700 font-semibold' : 'text-zinc-600 bg-zinc-100'}`}>
                       Restlaufzeit: {remaining.label}
                     </span>
                   </div>
-                  <div className="mt-2 text-sm text-zinc-600">
-                    Höchstgebot: <span className="font-semibold text-zinc-900">{Number(auction.highest_bid || 0).toLocaleString('de-DE')}€</span>
-                  </div>
+                  {Number(auction.highest_bid || 0) > 0 && !auction.my_bid && (
+                    <div className="mt-2 text-sm text-zinc-600">
+                      Höchstgebot: <span className="font-semibold text-zinc-900">{Number(auction.highest_bid || 0).toLocaleString('de-DE')}€</span>
+                    </div>
+                  )}
                   {isOwnSale && !!auction.highest_bidder_id && Number(auction.highest_bid || 0) > 0 && (
                     <div className="mt-3">
                       <button
@@ -1074,6 +1306,16 @@ const loadAuctions = async () => {
                         className="text-xs px-3 py-1.5 rounded-md border border-emerald-300 text-emerald-700 hover:bg-emerald-50"
                       >
                         Hoechstes Gebot annehmen
+                      </button>
+                    </div>
+                  )}
+                  {isOwnSale && (
+                    <div className="mt-3">
+                      <button
+                        onClick={() => cancelPlayerSale(auction.id)}
+                        className="text-xs px-3 py-1.5 rounded-md border border-red-300 text-red-700 hover:bg-red-50"
+                      >
+                        Angebot stornieren
                       </button>
                     </div>
                   )}
@@ -1122,7 +1364,7 @@ const loadAuctions = async () => {
                     <img
                       src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                       alt={`${player.first_name} ${player.last_name}`}
-                      className="w-8 h-8 rounded-full object-cover shrink-0"
+                      className="w-10 h-10 rounded-full object-cover shrink-0"
                     />
                     <span className="underline decoration-zinc-300">{player.first_name} {player.last_name}</span>
                     <span 
@@ -1413,7 +1655,19 @@ const loadAuctions = async () => {
               {news.map((entry) => (
                 <li key={entry.id} className="p-4 bg-white rounded-xl shadow-sm border border-zinc-100">
                   <div className="flex items-center justify-between mb-1">
-                    <span className="font-semibold text-zinc-900">{entry.title}</span>
+                    <span className="font-semibold text-zinc-900 flex items-center gap-2">
+                      {entry.team_image_url && (
+                        <img
+                          src={entry.team_image_url}
+                          alt="Manager"
+                          className="w-6 h-6 rounded-full object-cover border border-zinc-300"
+                        />
+                      )}
+                      {entry.title}
+                      {isNewsEntryNew(entry.created_at) && (
+                        <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" aria-label="Neuer Eintrag" title="Neuer Eintrag" />
+                      )}
+                    </span>
                     <span className="text-xs text-zinc-500">{new Date(entry.created_at).toLocaleString('de-DE')}</span>
                   </div>
                   <p className="text-sm text-zinc-600">{entry.message}</p>

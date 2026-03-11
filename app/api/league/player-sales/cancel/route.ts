@@ -1,9 +1,10 @@
-import { createClient } from '@/utils/supabase/server';
+import { createClient as createServerAuthClient } from '@/utils/supabase/server';
+import { createAdminClient } from '@/lib/transfer-market';
 import { NextRequest, NextResponse } from 'next/server';
 
 export async function DELETE(request: NextRequest) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const authClient = await createServerAuthClient();
+  const { data: { user } } = await authClient.auth.getUser();
 
   if (!user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -19,10 +20,12 @@ export async function DELETE(request: NextRequest) {
   }
 
   try {
+    const supabase = createAdminClient();
+
     // Get the auction
     const { data: auction, error: auctionError } = await supabase
       .from('market_auctions')
-      .select('id, seller_team_id, player_id, highest_bidder_id, highest_bid')
+      .select('id, league_id, seller_team_id, player_id')
       .eq('id', auctionId)
       .single();
 
@@ -33,11 +36,19 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
+    if (auction.league_id !== leagueId) {
+      return NextResponse.json(
+        { error: 'Auction does not belong to this league' },
+        { status: 400 }
+      );
+    }
+
     // Verify user owns the selling team
     const { data: team } = await supabase
       .from('fantasy_teams')
       .select('id, user_id')
       .eq('id', auction.seller_team_id)
+      .eq('league_id', leagueId)
       .single();
 
     if (team?.user_id !== user.id) {
@@ -47,27 +58,49 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // If there's a highest bid and bidder, refund the bid
-    if (auction.highest_bidder_id && auction.highest_bid > 0) {
+    // Find all auctions for this player in this league to avoid trigger conflicts.
+    const { data: relatedAuctions, error: relatedAuctionsError } = await supabase
+      .from('market_auctions')
+      .select('id, highest_bidder_id, highest_bid')
+      .eq('league_id', leagueId)
+      .eq('player_id', auction.player_id);
+
+    if (relatedAuctionsError) {
+      console.error('Related auctions query error:', relatedAuctionsError);
+      return NextResponse.json(
+        { error: 'Failed to inspect related auctions' },
+        { status: 500 }
+      );
+    }
+
+    const auctionsToDelete = relatedAuctions || [];
+
+    // Refund highest bids for every related auction that gets removed.
+    for (const relatedAuction of auctionsToDelete) {
+      if (!relatedAuction.highest_bidder_id || Number(relatedAuction.highest_bid || 0) <= 0) {
+        continue;
+      }
+
       const { data: bidderTeam } = await supabase
         .from('fantasy_teams')
         .select('id, budget')
-        .eq('id', auction.highest_bidder_id)
+        .eq('id', relatedAuction.highest_bidder_id)
         .single();
 
       if (bidderTeam) {
         await supabase
           .from('fantasy_teams')
-          .update({ budget: bidderTeam.budget + auction.highest_bid })
+          .update({ budget: Number(bidderTeam.budget || 0) + Number(relatedAuction.highest_bid || 0) })
           .eq('id', bidderTeam.id);
       }
     }
 
-    // Delete the auction
+    // Delete every related auction for this player in this league.
     const { error: deleteError } = await supabase
       .from('market_auctions')
       .delete()
-      .eq('id', auctionId);
+      .eq('league_id', leagueId)
+      .eq('player_id', auction.player_id);
 
     if (deleteError) {
       console.error('Auction deletion error:', deleteError);
@@ -77,13 +110,13 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Return player to team
+    // Return player to team.
     const { error: insertError } = await supabase
       .from('team_players')
-      .insert({
+      .upsert({
         team_id: auction.seller_team_id,
         player_id: auction.player_id,
-      });
+      }, { onConflict: 'team_id,player_id' });
 
     if (insertError) {
       console.error('Player reinsertion error:', insertError);

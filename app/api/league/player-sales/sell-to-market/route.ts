@@ -1,13 +1,16 @@
-import { createClient } from '@/utils/supabase/server';
+import { createClient as createServerAuthClient } from '@/utils/supabase/server';
 import { NextRequest, NextResponse } from 'next/server';
+import { createAdminClient } from '@/lib/transfer-market';
 
 export async function POST(request: NextRequest) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const authClient = await createServerAuthClient();
+  const { data: { user } } = await authClient.auth.getUser();
 
   if (!user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
+
+  const supabase = createAdminClient();
 
   const { playerId, leagueId } = await request.json();
 
@@ -115,7 +118,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Create sales history entry
-    await supabase
+    const { error: historyError } = await supabase
       .from('player_sales_history')
       .insert({
         seller_team_id: team.id,
@@ -124,6 +127,14 @@ export async function POST(request: NextRequest) {
         sale_price: marketValue,
         sale_type: 'market_sale',
       });
+
+    if (historyError) {
+      console.error('Sales history insert error:', historyError);
+      return NextResponse.json(
+        { error: 'Failed to write sales history' },
+        { status: 500 }
+      );
+    }
 
     // Add player to market_player_rotation
     await supabase

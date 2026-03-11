@@ -126,10 +126,10 @@ export async function POST(request: Request) {
       .update({ budget: Number(sellerTeam.budget || 0) + winningAmount })
       .eq('id', sellerTeam.id)
 
-    await supabase
+    const { error: historyError } = await supabase
       .from('player_sales_history')
       .insert({
-        auction_id: auction.id,
+        auction_id: null,
         seller_team_id: sellerTeam.id,
         buyer_team_id: winnerTeamId,
         player_id: auction.player_id,
@@ -137,6 +137,10 @@ export async function POST(request: Request) {
         sale_price: winningAmount,
         sale_type: 'auction_win',
       })
+
+    if (historyError) {
+      return NextResponse.json({ error: `Failed to write sales history: ${historyError.message}` }, { status: 500 })
+    }
 
     const loserTeamIds = Array.from(
       new Set(
