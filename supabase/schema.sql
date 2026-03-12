@@ -22,6 +22,7 @@ CREATE TABLE player_matches (
     player_id UUID REFERENCES players(id) ON DELETE CASCADE,
     tournament_id UUID REFERENCES tournaments(id) ON DELETE SET NULL,
     tournament_name TEXT NOT NULL,
+    round TEXT CHECK (round IN ('R1', 'R2', 'R3', 'QF', 'SF', 'F')),
     opponent_name TEXT NOT NULL,
     match_result TEXT NOT NULL,
     fantasy_points INT DEFAULT 0,

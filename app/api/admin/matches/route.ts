@@ -1,6 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/utils/supabase/server';
 
+const allowedRounds = ['R1', 'R2', 'R3', 'QF', 'SF', 'F'] as const;
+
+function normalizeMatchDate(matchDate: unknown) {
+  if (typeof matchDate !== 'string' || !matchDate.trim()) return null;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(matchDate)) {
+    return `${matchDate}T12:00:00.000Z`;
+  }
+
+  const parsed = new Date(matchDate);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
 function createAdminClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -42,6 +56,7 @@ export async function POST(request: NextRequest) {
       player_id,
       tournament_id,
       tournament_name,
+      round,
       opponent_name,
       match_result,
       match_date,
@@ -64,6 +79,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (round !== undefined && !allowedRounds.includes(round)) {
+      return NextResponse.json(
+        { error: 'Invalid round. Allowed values: R1, R2, R3, QF, SF, F' },
+        { status: 400 }
+      );
+    }
+
+    const normalizedRound = round ?? 'R1';
+
+    const normalizedMatchDate = normalizeMatchDate(match_date);
+    if (!normalizedMatchDate) {
+      return NextResponse.json(
+        { error: 'Invalid match_date' },
+        { status: 400 }
+      );
+    }
+
     const supabase = createAdminClient();
 
     const { data: match, error } = await (supabase as any)
@@ -72,9 +104,10 @@ export async function POST(request: NextRequest) {
         player_id,
         tournament_id: tournament_id || null,
         tournament_name,
+        round: normalizedRound,
         opponent_name,
         match_result,
-        match_date: new Date(match_date).toISOString(),
+        match_date: normalizedMatchDate,
         aces,
         double_faults,
         first_serve_percentage,

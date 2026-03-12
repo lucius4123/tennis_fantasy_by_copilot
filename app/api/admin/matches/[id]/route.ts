@@ -1,5 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+const allowedRounds = ['R1', 'R2', 'R3', 'QF', 'SF', 'F'] as const;
+
+function normalizeMatchDate(matchDate: unknown) {
+  if (typeof matchDate !== 'string' || !matchDate.trim()) return null;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(matchDate)) {
+    return `${matchDate}T12:00:00.000Z`;
+  }
+
+  const parsed = new Date(matchDate);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
 function createAdminClient() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -20,6 +34,7 @@ export async function PATCH(
       'player_id',
       'tournament_id',
       'tournament_name',
+      'round',
       'opponent_name',
       'match_result',
       'match_date',
@@ -38,7 +53,22 @@ export async function PATCH(
     const updatePayload: Record<string, unknown> = {};
     for (const field of allowedFields) {
       if (body[field] !== undefined) {
-        updatePayload[field] = field === 'match_date' ? new Date(body[field]).toISOString() : body[field];
+        if (field === 'match_date') {
+          const normalizedMatchDate = normalizeMatchDate(body[field]);
+          if (!normalizedMatchDate) {
+            return NextResponse.json({ error: 'Invalid match_date' }, { status: 400 });
+          }
+          updatePayload[field] = normalizedMatchDate;
+          continue;
+        }
+
+        if (field === 'round') {
+          if (!allowedRounds.includes(body[field])) {
+            return NextResponse.json({ error: 'Invalid round. Allowed values: R1, R2, R3, QF, SF, F' }, { status: 400 });
+          }
+        }
+
+        updatePayload[field] = body[field];
       }
     }
 

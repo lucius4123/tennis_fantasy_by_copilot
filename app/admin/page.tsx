@@ -41,6 +41,7 @@ interface Match {
   player_id: string
   tournament_id?: string
   tournament_name: string
+  round?: 'R1' | 'R2' | 'R3' | 'QF' | 'SF' | 'F' | null
   opponent_name: string
   match_result: string
   match_date: string
@@ -83,10 +84,13 @@ const probabilityColors: Record<string, string> = {
   Ausgeschlossen: 'bg-zinc-200 text-zinc-800 border-zinc-400',
 }
 
+const roundOptions = ['R1', 'R2', 'R3', 'QF', 'SF', 'F'] as const
+
 const emptyMatchFormData = {
   player_id: '',
   tournament_id: '',
   tournament_name: '',
+  round: 'R1',
   opponent_name: '',
   match_result: 'won',
   match_date: '',
@@ -523,11 +527,11 @@ export default function AdminPage() {
     setOriginalScoringRules(rules)
   }
 
-  const toDateTimeLocal = (value: string) => {
+  const toDateInput = (value: string) => {
     const date = new Date(value)
     if (Number.isNaN(date.getTime())) return ''
     const pad = (n: number) => n.toString().padStart(2, '0')
-    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
   }
 
   const startMatchEdit = (match: Match) => {
@@ -536,9 +540,10 @@ export default function AdminPage() {
       player_id: match.player_id,
       tournament_id: match.tournament_id || '',
       tournament_name: match.tournament_name,
+      round: match.round || 'R1',
       opponent_name: match.opponent_name,
       match_result: match.match_result,
-      match_date: toDateTimeLocal(match.match_date),
+      match_date: toDateInput(match.match_date),
       aces: match.aces || 0,
       double_faults: match.double_faults || 0,
       first_serve_percentage: match.first_serve_percentage || 0,
@@ -1074,9 +1079,22 @@ export default function AdminPage() {
                   </div>
 
                   <div>
+                    <label className="block text-sm font-medium text-zinc-700 mb-1">Runde</label>
+                    <select
+                      value={matchFormData.round}
+                      onChange={(e) => setMatchFormData({ ...matchFormData, round: e.target.value as typeof roundOptions[number] })}
+                      className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                    >
+                      {roundOptions.map((round) => (
+                        <option key={round} value={round}>{round}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
                     <label className="block text-sm font-medium text-zinc-700 mb-1">Match-Datum</label>
                     <input
-                      type="datetime-local"
+                      type="date"
                       value={matchFormData.match_date}
                       onChange={(e) => setMatchFormData({ ...matchFormData, match_date: e.target.value })}
                       className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
@@ -1223,6 +1241,9 @@ export default function AdminPage() {
                         </div>
                         <div>
                           <span className="text-zinc-500">Datum:</span> {new Date(match.match_date).toLocaleDateString('de-DE')}
+                        </div>
+                        <div>
+                          <span className="text-zinc-500">Runde:</span> {match.round || '-'}
                         </div>
                         <div>
                           <span className="text-zinc-500">Fantasy Punkte:</span>{' '}

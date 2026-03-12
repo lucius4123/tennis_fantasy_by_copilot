@@ -106,6 +106,16 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       return NextResponse.json({ error: clearRotationError.message, code: clearRotationError.code }, { status: 500 })
     }
 
+    const { error: clearLeagueNewsError } = await supabase.from('league_news').delete().not('id', 'is', null)
+    if (clearLeagueNewsError) {
+      return NextResponse.json({ error: clearLeagueNewsError.message, code: clearLeagueNewsError.code }, { status: 500 })
+    }
+
+    const { error: clearSalesHistoryError } = await supabase.from('player_sales_history').delete().not('id', 'is', null)
+    if (clearSalesHistoryError) {
+      return NextResponse.json({ error: clearSalesHistoryError.message, code: clearSalesHistoryError.code }, { status: 500 })
+    }
+
     try {
       await resetAllTeamBudgets(supabase, Number(activatedTournament?.start_budget ?? 1000000))
     } catch (budgetError: any) {

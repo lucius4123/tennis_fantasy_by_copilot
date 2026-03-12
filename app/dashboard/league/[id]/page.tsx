@@ -41,6 +41,7 @@ interface PlayerMatch {
   tournament_name: string;
   opponent_name: string;
   match_result: string;
+  round?: 'R1' | 'R2' | 'R3' | 'QF' | 'SF' | 'F' | null;
   match_date: string;
   fantasy_points: number;
   aces: number;
@@ -84,6 +85,11 @@ interface TeamInspection {
   lineup: Player[];
 }
 
+interface PlayerRoundState {
+  label: string;
+  inTournament: boolean;
+}
+
 type LineupSlot = Player | null;
 
 export default function LeaguePage() {
@@ -109,6 +115,7 @@ export default function LeaguePage() {
   const [lastSeenNewsAt, setLastSeenNewsAt] = useState<string | null>(null);
   const [timeTick, setTimeTick] = useState(0);
   const [playerTournamentPoints, setPlayerTournamentPoints] = useState<Map<string, number>>(new Map());
+  const [playerRoundStates, setPlayerRoundStates] = useState<Map<string, PlayerRoundState>>(new Map());
   const [myBudget, setMyBudget] = useState<number | null>(null);
   const [teamInspection, setTeamInspection] = useState<TeamInspection | null>(null);
   const [teamInspectionLoading, setTeamInspectionLoading] = useState(false);
@@ -237,6 +244,23 @@ export default function LeaguePage() {
     };
   }, [isLineupEditMode, activeTab]);
 
+  useEffect(() => {
+    if (activeTournament?.status !== 'on-going' || !isLineupEditMode) return;
+
+    if (touchDragTimerRef.current) {
+      clearTimeout(touchDragTimerRef.current);
+      touchDragTimerRef.current = null;
+    }
+
+    touchStartPointRef.current = null;
+    setIsLineupEditMode(false);
+    setDraggedPlayerId(null);
+    setDraggedFromSlot(null);
+    setSelectedPlayerId(null);
+    setSelectedFromSlot(null);
+    setIsTouchDragActive(false);
+  }, [activeTournament?.status, isLineupEditMode]);
+
   const loadLeaderboard = async () => {
     const { data } = await supabase
       .from('fantasy_teams')
@@ -283,19 +307,75 @@ export default function LeaguePage() {
   const loadPlayerTournamentPoints = async () => {
     if (!activeTournamentId) return;
 
-    const { data: matches } = await supabase
+    let matches: any[] = [];
+
+    const { data: detailedMatches, error: detailedMatchesError } = await supabase
       .from('player_matches')
-      .select('player_id, fantasy_points')
+      .select('player_id, fantasy_points, match_result, round, match_date')
       .eq('tournament_id', activeTournamentId);
 
-    if (matches) {
-      const pointsMap = new Map<string, number>();
-      for (const match of matches) {
-        const currentPoints = pointsMap.get(match.player_id) || 0;
-        pointsMap.set(match.player_id, currentPoints + (match.fantasy_points || 0));
+    if (detailedMatchesError) {
+      console.error('Failed to load detailed match data, falling back to points-only query:', detailedMatchesError);
+      const { data: fallbackMatches, error: fallbackError } = await supabase
+        .from('player_matches')
+        .select('player_id, fantasy_points, match_result, match_date')
+        .eq('tournament_id', activeTournamentId);
+
+      if (fallbackError) {
+        console.error('Failed to load match data:', fallbackError);
+        return;
       }
-      setPlayerTournamentPoints(pointsMap);
+
+      matches = fallbackMatches || [];
+    } else {
+      matches = detailedMatches || [];
     }
+
+    const pointsMap = new Map<string, number>();
+    const latestMatchByPlayer = new Map<string, any>();
+    for (const match of matches) {
+      const currentPoints = pointsMap.get(match.player_id) || 0;
+      pointsMap.set(match.player_id, currentPoints + (match.fantasy_points || 0));
+
+      const existingLatest = latestMatchByPlayer.get(match.player_id);
+      const currentDate = new Date(match.match_date).getTime();
+      const existingDate = existingLatest ? new Date(existingLatest.match_date).getTime() : -Infinity;
+      if (!existingLatest || currentDate >= existingDate) {
+        latestMatchByPlayer.set(match.player_id, match);
+      }
+    }
+
+    const nextRoundMap: Record<string, string> = {
+      R1: 'R2',
+      R2: 'R3',
+      R3: 'QF',
+      QF: 'SF',
+      SF: 'F',
+      F: 'SIEGER',
+    };
+
+    const roundStateMap = new Map<string, PlayerRoundState>();
+    for (const [playerId, latestMatch] of latestMatchByPlayer.entries()) {
+      const matchResult = latestMatch.match_result as string | undefined;
+      const playedRound = latestMatch.round as string | undefined;
+
+      if (matchResult === 'lost') {
+        roundStateMap.set(playerId, { label: 'OUT', inTournament: false });
+        continue;
+      }
+
+      if (matchResult === 'won') {
+        const nextRound = playedRound ? (nextRoundMap[playedRound] || 'R1/R2') : 'R1/R2';
+        const stillInTournament = playedRound !== 'F';
+        roundStateMap.set(playerId, { label: nextRound, inTournament: stillInTournament });
+        continue;
+      }
+
+      roundStateMap.set(playerId, { label: 'R1/R2', inTournament: true });
+    }
+
+    setPlayerTournamentPoints(pointsMap);
+    setPlayerRoundStates(roundStateMap);
   };
 
 const loadAuctions = async () => {
@@ -481,8 +561,8 @@ const loadAuctions = async () => {
     const file = event.target.files?.[0];
     if (!file || !myTeamId) return;
 
-    if (file.size > 1024 * 1024) {
-      alert('Das Profilbild darf maximal 1MB groß sein.');
+    if (file.size > 2 * 1024 * 1024) {
+      alert('Das Profilbild darf maximal 2MB groß sein.');
       event.target.value = '';
       return;
     }
@@ -1111,6 +1191,7 @@ const loadAuctions = async () => {
   const notInLineupPlayers = myTeam.filter(
     (teamPlayer) => !lineupSlots.some((slotPlayer) => slotPlayer?.id === teamPlayer.id)
   );
+  const isLineupLocked = activeTournament?.status === 'on-going';
   const inspectionLineupPositions = [
     'left-3 top-4 sm:left-8 sm:top-6',
     'right-3 top-4 sm:right-8 sm:top-6',
@@ -1165,9 +1246,6 @@ const loadAuctions = async () => {
                       <span className="block font-medium text-zinc-900">
                         {team.name}
                         {team.id === myTeamId ? ' (Du)' : ''}
-                      </span>
-                      <span className="text-xs text-zinc-500">
-                        {team.id === myTeamId ? 'Dein Team im Vergleich ansehen' : 'Kader und Aufstellung ansehen'}
                       </span>
                     </div>
                   </div>
@@ -1441,29 +1519,32 @@ const loadAuctions = async () => {
                     )}
                   </div>
                   <div className="text-right">
-                    <span className="block text-zinc-500">Start: {new Date(activeTournament.start_date).toLocaleDateString('de-DE')}</span>
                     <span className={`inline-block mt-1 text-xs px-2 py-1 rounded-md ${lineupDeadline.urgent ? 'bg-orange-100 text-orange-700 font-semibold' : 'bg-sky-100 text-sky-700'}`}>
                       Restzeit Aufstellung: {lineupDeadline.label}
                     </span>
                   </div>
                 </div>
-                <p className="text-sm text-zinc-500">Ziehe bis zu 5 Spieler in das Feld. Aufgestellte Spieler zaehlen direkt fuer deine Fantasy-Punkte.</p>
               </div>
                 ) : null;
               })()}
 
               <div
                 ref={courtContainerRef}
-                className={`bg-sky-300 rounded-2xl p-4 sm:p-6 shadow-md mb-5 border border-sky-200 ${!isLineupEditMode ? 'cursor-pointer' : ''}`}
+                className={`${isLineupLocked ? 'bg-sky-500 border-sky-400' : 'bg-sky-300 border-sky-200'} rounded-2xl p-4 sm:p-6 shadow-md mb-5 border ${!isLineupEditMode && !isLineupLocked ? 'cursor-pointer' : ''}`}
                 onClick={() => {
-                  if (!isLineupEditMode) {
+                  if (!isLineupEditMode && !isLineupLocked) {
                     setIsLineupEditMode(true);
                   }
                 }}
               >
-                {!isLineupEditMode && (
+                {!isLineupEditMode && !isLineupLocked && (
                   <div className="mb-3 text-sm font-medium text-sky-900 bg-white/80 border border-white rounded-lg px-3 py-2">
                     Tippe auf das Feld, um den Bearbeitungsmodus zu aktivieren.
+                  </div>
+                )}
+                {!isLineupEditMode && isLineupLocked && (
+                  <div className="mb-3 text-sm font-medium text-white bg-sky-700/80 border border-sky-200 rounded-lg px-3 py-2">
+                    Bearbeitungsmodus ist waehrend eines laufenden Turniers deaktiviert.
                   </div>
                 )}
                 <div className={`relative rounded-xl h-[420px] sm:h-[480px] border-4 border-white overflow-hidden ${isLineupEditMode ? 'touch-none' : ''}`}>
@@ -1485,6 +1566,13 @@ const loadAuctions = async () => {
                     ];
 
                     const player = lineupSlots[slotIndex];
+                    const roundState = player ? playerRoundStates.get(player.id) : undefined;
+                    const roundLabel = roundState?.label || 'R1/R2';
+                    const highlightActive = Boolean(
+                      player
+                      && activeTournament?.status === 'on-going'
+                      && (roundState ? roundState.inTournament : true)
+                    );
                     return (
                       <div
                         key={slotIndex}
@@ -1516,10 +1604,11 @@ const loadAuctions = async () => {
                               <img
                                 src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                                 alt={`${player.first_name} ${player.last_name}`}
-                                className="w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border border-zinc-200"
+                                className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-zinc-200'}`}
                               />
                               <p className="text-xs font-semibold mt-1">{player.first_name.charAt(0)}. {player.last_name}</p>
                               <p className="text-xs text-emerald-600 font-bold">{playerTournamentPoints.get(player.id) || 0} Pkt</p>
+                              <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-sky-700'}`}>{roundLabel}</p>
                             </div>
                           ) : (
                             <p className="text-xs text-zinc-500">Slot {slotIndex + 1}</p>
@@ -1780,6 +1869,13 @@ const loadAuctions = async () => {
 
                         {[0, 1, 2, 3, 4].map((slotIndex) => {
                           const player = teamInspection.lineup[slotIndex] || null;
+                          const roundState = player ? playerRoundStates.get(player.id) : undefined;
+                          const roundLabel = roundState?.label || 'R1/R2';
+                          const highlightActive = Boolean(
+                            player
+                            && activeTournament?.status === 'on-going'
+                            && (roundState ? roundState.inTournament : true)
+                          );
 
                           return (
                             <div
@@ -1796,11 +1892,12 @@ const loadAuctions = async () => {
                                     <img
                                       src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                                       alt={`${player.first_name} ${player.last_name}`}
-                                      className="w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border border-zinc-200"
+                                      className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-zinc-200'}`}
                                     />
                                     <p className="text-xs font-semibold mt-1">{player.first_name.charAt(0)}. {player.last_name}</p>
                                     <p className="text-xs text-zinc-500">#{player.ranking}</p>
                                     <p className="text-xs text-emerald-600 font-bold">{playerTournamentPoints.get(player.id) || 0} Pkt</p>
+                                    <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-sky-700'}`}>{roundLabel}</p>
                                   </button>
                                 ) : (
                                   <p className="text-xs text-zinc-500 pt-7">Freier Slot</p>
