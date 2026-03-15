@@ -22,7 +22,7 @@ function pickRandomItems<T>(items: T[], count: number): T[] {
 
 function getRandomAuctionEndTime() {
   const now = new Date()
-  const hours = randomInt(1, 24)
+  const hours = randomInt(3, 24)
   const end = new Date(now.getTime() + hours * 60 * 60 * 1000)
   return end.toISOString()
 }
@@ -505,7 +505,7 @@ export async function refillTransferMarketForActiveTournament(supabase: AdminCli
     const activeAuctionPlayerIds = new Set<string>((activeAuctions || []).map((a: any) => a.player_id as string))
     const activeCount = activeAuctions?.length || 0
 
-    if (activeCount >= 5) continue
+    if (activeCount >= 8) continue
 
     const { data: leagueTeams, error: teamsError } = await supabase
       .from('fantasy_teams')
@@ -531,7 +531,7 @@ export async function refillTransferMarketForActiveTournament(supabase: AdminCli
       (playerId: string) => !activeAuctionPlayerIds.has(playerId) && !teamPlayerIds.has(playerId)
     )
 
-    const needed = Math.min(5 - activeCount, candidates.length)
+    const needed = Math.min(8 - activeCount, candidates.length)
     if (needed <= 0) continue
 
     const selectedPlayers = await pickPlayersForLeagueCycle(supabase, league.id, candidates, needed, nowIso)
