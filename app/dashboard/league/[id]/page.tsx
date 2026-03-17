@@ -17,12 +17,16 @@ interface Auction {
   player_id: string;
   end_time: string;
   seller_team_id?: string | null;
+  seller_team_name?: string | null;
   highest_bidder_id?: string | null;
   highest_bid?: number;
   player: { first_name: string; last_name: string; ranking: number; country: string; image_url?: string };
   appearance_probability?: string;
+  is_wildcard?: boolean;
   market_value?: number;
   my_bid?: number;
+  highest_bidder_team_name?: string | null;
+  incoming_bids?: { team_id: string; team_name: string; bid_amount: number; created_at: string }[];
   seller_team_image_url?: string | null;
 }
 
@@ -34,6 +38,7 @@ interface Player {
   country: string;
   image_url?: string;
   appearance_probability?: string;
+  is_wildcard?: boolean;
 }
 
 interface PlayerMatch {
@@ -82,7 +87,8 @@ interface PlayerSalesHistoryEntry {
 interface TeamInspection {
   team: FantasyTeam;
   squad: Player[];
-  lineup: Player[];
+  lineupSlots: LineupSlot[];
+  reserveSlots: LineupSlot[];
 }
 
 interface PlayerRoundState {
@@ -91,6 +97,14 @@ interface PlayerRoundState {
 }
 
 type LineupSlot = Player | null;
+
+const MAIN_LINEUP_SLOT_COUNT = 5;
+const RESERVE_LINEUP_SLOT_COUNT = 2;
+const TOTAL_LINEUP_SLOT_COUNT = MAIN_LINEUP_SLOT_COUNT + RESERVE_LINEUP_SLOT_COUNT;
+const RESERVE_SLOT_START_INDEX = MAIN_LINEUP_SLOT_COUNT;
+const RESERVE_ELIGIBLE_RANKING_THRESHOLD = 75;
+
+const createEmptyLineupSlots = (count: number): LineupSlot[] => Array.from({ length: count }, () => null);
 
 export default function LeaguePage() {
   const params = useParams();
@@ -105,7 +119,7 @@ export default function LeaguePage() {
   const [myTeamId, setMyTeamId] = useState<string>('');
   const [activeTournamentId, setActiveTournamentId] = useState<string>('');
   const [activeTournament, setActiveTournament] = useState<Tournament | null>(null);
-  const [lineupSlots, setLineupSlots] = useState<LineupSlot[]>([null, null, null, null, null]);
+  const [lineupSlots, setLineupSlots] = useState<LineupSlot[]>(() => createEmptyLineupSlots(TOTAL_LINEUP_SLOT_COUNT));
   const [draggedPlayerId, setDraggedPlayerId] = useState<string | null>(null);
   const [draggedFromSlot, setDraggedFromSlot] = useState<number | null>(null);
   const [historyPlayer, setHistoryPlayer] = useState<Player | null>(null);
@@ -127,6 +141,7 @@ export default function LeaguePage() {
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
   const [selectedFromSlot, setSelectedFromSlot] = useState<number | null>(null);
   const [isTouchDragActive, setIsTouchDragActive] = useState(false);
+  const lineupEditorScrollRef = useRef<HTMLDivElement | null>(null);
   const courtContainerRef = useRef<HTMLDivElement | null>(null);
   const touchDragTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const touchStartPointRef = useRef<{ x: number; y: number } | null>(null);
@@ -151,6 +166,23 @@ export default function LeaguePage() {
       default:
         return { icon: '❓', color: 'text-gray-400', label: 'Unbekannt' };
     }
+  };
+
+  const formatLineupPlayerName = (player: Pick<Player, 'first_name'>) => player.first_name;
+  const isReserveSlot = (slotIndex: number) => slotIndex >= RESERVE_SLOT_START_INDEX;
+  const isReserveEligiblePlayer = (player: Player | null) => !player || player.ranking > RESERVE_ELIGIBLE_RANKING_THRESHOLD;
+  const getReserveValidationError = (slots: LineupSlot[]) => {
+    for (let slotIndex = RESERVE_SLOT_START_INDEX; slotIndex < slots.length; slotIndex += 1) {
+      const player = slots[slotIndex];
+      if (!isReserveEligiblePlayer(player)) {
+        return `${player?.first_name} ${player?.last_name} darf nur ins Zusatzfeld, wenn das Ranking schlechter als ${RESERVE_ELIGIBLE_RANKING_THRESHOLD} ist.`;
+      }
+    }
+    return null;
+  };
+  const getDisplayedLineupPoints = (player: Player, slotIndex: number) => {
+    const points = playerTournamentPoints.get(player.id) || 0;
+    return isReserveSlot(slotIndex) ? Math.max(0, points) : points;
   };
 
   useEffect(() => {
@@ -226,7 +258,9 @@ export default function LeaguePage() {
 
   useEffect(() => {
     if (!isLineupEditMode) return;
-    courtContainerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    lineupEditorScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+    courtContainerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [isLineupEditMode]);
 
   useEffect(() => {
@@ -288,18 +322,20 @@ export default function LeaguePage() {
 
     const { data } = await supabase
       .from('tournament_lineups')
-      .select('player:players(id, first_name, last_name, ranking, country, image_url)')
+      .select('slot_index, player:players(id, first_name, last_name, ranking, country, image_url)')
       .eq('tournament_id', activeTournamentId)
-      .eq('team_id', myTeamId);
+      .eq('team_id', myTeamId)
+      .order('slot_index', { ascending: true });
 
-    const lineupPlayers = (data || [])
-      .map((entry: any) => (Array.isArray(entry.player) ? entry.player[0] : entry.player))
-      .filter(Boolean);
-
-    const nextSlots: LineupSlot[] = [null, null, null, null, null];
-    lineupPlayers.slice(0, 5).forEach((player: Player, index: number) => {
-      nextSlots[index] = player;
-    });
+    const nextSlots = createEmptyLineupSlots(TOTAL_LINEUP_SLOT_COUNT);
+    for (const entry of data || []) {
+      const player = Array.isArray((entry as any).player) ? (entry as any).player[0] : (entry as any).player;
+      const slotIndex = Number((entry as any).slot_index);
+      if (!player || !Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= TOTAL_LINEUP_SLOT_COUNT) {
+        continue;
+      }
+      nextSlots[slotIndex] = player;
+    }
 
     setLineupSlots(nextSlots);
   };
@@ -403,18 +439,26 @@ const loadAuctions = async () => {
     const playerIds = data.map((auction: any) => auction.player_id);
     const { data: probabilities } = await supabase
       .from('tournament_players')
-      .select('player_id, appearance_probability, market_value')
+      .select('player_id, appearance_probability, market_value, is_wildcard')
       .eq('tournament_id', activeTournamentId)
       .in('player_id', playerIds);
 
     const probabilityMap = new Map(
-      (probabilities || []).map(p => [p.player_id, { appearance_probability: p.appearance_probability, market_value: p.market_value }])
+      (probabilities || []).map(p => [
+        p.player_id,
+        {
+          appearance_probability: p.appearance_probability,
+          market_value: p.market_value,
+          is_wildcard: Boolean(p.is_wildcard),
+        },
+      ])
     );
 
     const formattedData = data.map((auction: any) => ({
       ...auction,
       player: Array.isArray(auction.player) ? auction.player[0] : auction.player,
       appearance_probability: probabilityMap.get(auction.player_id)?.appearance_probability,
+      is_wildcard: probabilityMap.get(auction.player_id)?.is_wildcard,
       market_value: probabilityMap.get(auction.player_id)?.market_value || 0
     }));
 
@@ -427,20 +471,77 @@ const loadAuctions = async () => {
     );
 
     let sellerTeamImageMap = new Map<string, string | null>();
+    let sellerTeamNameMap = new Map<string, string>();
     if (sellerTeamIds.length > 0) {
       const { data: sellerTeams } = await supabase
         .from('fantasy_teams')
-        .select('id, profile_image_url')
+        .select('id, name, profile_image_url')
         .in('id', sellerTeamIds);
 
       sellerTeamImageMap = new Map(
         (sellerTeams || []).map((team: any) => [team.id, team.profile_image_url || null])
       );
+      sellerTeamNameMap = new Map(
+        (sellerTeams || []).map((team: any) => [team.id, team.name])
+      );
+    }
+
+    const highestBidderTeamIds = Array.from(
+      new Set(
+        formattedData
+          .map((auction: any) => auction.highest_bidder_id)
+          .filter((teamId: string | null | undefined): teamId is string => Boolean(teamId))
+      )
+    );
+
+    let bidderTeamNameMap = new Map<string, string>();
+    if (highestBidderTeamIds.length > 0) {
+      const { data: bidderTeams } = await supabase
+        .from('fantasy_teams')
+        .select('id, name')
+        .in('id', highestBidderTeamIds);
+
+      bidderTeamNameMap = new Map(
+        (bidderTeams || []).map((team: any) => [team.id, team.name])
+      );
+    }
+
+    const ownAuctionIds = formattedData
+      .filter((auction: any) => auction.seller_team_id && auction.seller_team_id === myTeamId)
+      .map((auction: any) => auction.id as string);
+
+    let incomingBidsByAuction = new Map<string, { team_id: string; team_name: string; bid_amount: number; created_at: string }[]>();
+    if (ownAuctionIds.length > 0) {
+      const bidsResponse = await fetch('/api/league/player-sales/bids', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leagueId, auctionIds: ownAuctionIds }),
+      });
+
+      const bidsPayload = await bidsResponse.json();
+      if (bidsResponse.ok && bidsPayload?.bidsByAuction) {
+        for (const [auctionId, bids] of Object.entries(bidsPayload.bidsByAuction as Record<string, any[]>)) {
+          incomingBidsByAuction.set(
+            auctionId,
+            (bids || []).map((bid: any) => ({
+              team_id: bid.team_id as string,
+              team_name: bid.team_name as string,
+              bid_amount: Number(bid.bid_amount || 0),
+              created_at: bid.created_at as string,
+            }))
+          );
+        }
+      }
     }
 
     const auctionsWithSellerImages = formattedData.map((auction: any) => ({
       ...auction,
       seller_team_image_url: auction.seller_team_id ? (sellerTeamImageMap.get(auction.seller_team_id) || null) : null,
+      seller_team_name: auction.seller_team_id ? (sellerTeamNameMap.get(auction.seller_team_id) || null) : null,
+      highest_bidder_team_name: auction.highest_bidder_id
+        ? (bidderTeamNameMap.get(auction.highest_bidder_id) || null)
+        : null,
+      incoming_bids: incomingBidsByAuction.get(auction.id) || [],
     }));
 
     const sortedData = [...auctionsWithSellerImages].sort(
@@ -524,6 +625,7 @@ const loadAuctions = async () => {
         const buyerName = row.buyer_team_id ? (teamNameById.get(row.buyer_team_id) || 'Team') : 'Markt';
         const priceText = Number(row.sale_price || 0).toLocaleString('de-DE');
         const sellerImage = row.seller_team_id ? (teamImageById.get(row.seller_team_id) || null) : null;
+        const buyerImage = row.buyer_team_id ? (teamImageById.get(row.buyer_team_id) || null) : null;
 
         if (row.sale_type === 'market_sale') {
           return {
@@ -533,6 +635,17 @@ const loadAuctions = async () => {
             created_at: row.created_at,
             team_id: row.seller_team_id,
             team_image_url: sellerImage,
+          };
+        }
+
+        if (!row.seller_team_id && row.buyer_team_id) {
+          return {
+            id: `sale-${row.id}`,
+            title: 'Spieler vom Markt gekauft',
+            message: `${buyerName} hat ${playerName} für ${priceText}€ vom Markt gekauft.`,
+            created_at: row.created_at,
+            team_id: row.buyer_team_id,
+            team_image_url: buyerImage,
           };
         }
 
@@ -624,11 +737,11 @@ const loadAuctions = async () => {
       return [] as Player[];
     }
 
-    const probabilityMap = new Map<string, string>();
+    const probabilityMap = new Map<string, { appearance_probability?: string; is_wildcard?: boolean }>();
     if (activeTournamentId) {
       const { data: probabilities, error: probabilitiesError } = await supabase
         .from('tournament_players')
-        .select('player_id, appearance_probability')
+        .select('player_id, appearance_probability, is_wildcard')
         .eq('tournament_id', activeTournamentId)
         .in('player_id', playerIds);
 
@@ -637,14 +750,18 @@ const loadAuctions = async () => {
       }
 
       for (const probability of probabilities || []) {
-        probabilityMap.set(probability.player_id, probability.appearance_probability);
+        probabilityMap.set(probability.player_id, {
+          appearance_probability: probability.appearance_probability,
+          is_wildcard: Boolean(probability.is_wildcard),
+        });
       }
     }
 
     return [...players]
       .map((player) => ({
         ...player,
-        appearance_probability: probabilityMap.get(player.id),
+        appearance_probability: probabilityMap.get(player.id)?.appearance_probability,
+        is_wildcard: probabilityMap.get(player.id)?.is_wildcard,
       }))
       .sort((left, right) => left.ranking - right.ranking);
   };
@@ -805,13 +922,13 @@ const loadAuctions = async () => {
     await loadAuctions();
   };
 
-  const acceptHighestBid = async (auctionId: string) => {
+  const acceptHighestBid = async (auctionId: string, bidderTeamId?: string) => {
     if (!myTeamId) return;
 
     const response = await fetch('/api/league/player-sales/accept', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auctionId, leagueId }),
+      body: JSON.stringify({ auctionId, leagueId, bidderTeamId }),
     });
 
     const payload = await response.json();
@@ -903,7 +1020,9 @@ const loadAuctions = async () => {
   const saveLineup = async (nextSlots: LineupSlot[]) => {
     if (!myTeamId || !activeTournamentId) return;
 
-    const selectedPlayers = nextSlots.filter(Boolean).map((player) => (player as Player).id);
+    const selectedPlayers = nextSlots
+      .map((player, slotIndex) => (player ? { playerId: player.id, slotIndex } : null))
+      .filter((entry): entry is { playerId: string; slotIndex: number } => Boolean(entry));
 
     await supabase
       .from('tournament_lineups')
@@ -913,10 +1032,11 @@ const loadAuctions = async () => {
 
     if (selectedPlayers.length === 0) return;
 
-    const inserts = selectedPlayers.map((playerId) => ({
+    const inserts = selectedPlayers.map(({ playerId, slotIndex }) => ({
       tournament_id: activeTournamentId,
       team_id: myTeamId,
       player_id: playerId,
+      slot_index: slotIndex,
     }));
 
     await supabase.from('tournament_lineups').insert(inserts);
@@ -926,6 +1046,12 @@ const loadAuctions = async () => {
     // Block lineup changes if tournament is on-going
     if (activeTournament?.status === 'on-going') {
       alert('Aufstellungsänderungen sind nicht mehr möglich, da das Turnier bereits läuft!');
+      return;
+    }
+
+    const reserveValidationError = getReserveValidationError(nextSlots);
+    if (reserveValidationError) {
+      alert(reserveValidationError);
       return;
     }
     
@@ -1150,34 +1276,54 @@ const loadAuctions = async () => {
 
   const openTeamInspection = async (team: FantasyTeam) => {
     setTeamInspectionLoading(true);
-    setTeamInspection({ team, squad: [], lineup: [] });
+    setTeamInspection({
+      team,
+      squad: [],
+      lineupSlots: createEmptyLineupSlots(MAIN_LINEUP_SLOT_COUNT),
+      reserveSlots: createEmptyLineupSlots(RESERVE_LINEUP_SLOT_COUNT),
+    });
 
     try {
       const squad = await loadTeamPlayers(team.id);
 
-      let lineup: Player[] = [];
+      let lineupSlots = createEmptyLineupSlots(MAIN_LINEUP_SLOT_COUNT);
+      let reserveSlots = createEmptyLineupSlots(RESERVE_LINEUP_SLOT_COUNT);
       if (activeTournamentId) {
         const { data: lineupData, error: lineupError } = await supabase
           .from('tournament_lineups')
-          .select('player:players(id, first_name, last_name, ranking, country, image_url)')
+          .select('slot_index, player:players(id, first_name, last_name, ranking, country, image_url)')
           .eq('tournament_id', activeTournamentId)
-          .eq('team_id', team.id);
+          .eq('team_id', team.id)
+          .order('slot_index', { ascending: true });
 
         if (lineupError) {
           console.error('Failed to load team lineup:', lineupError);
         }
 
         const squadMap = new Map(squad.map((player) => [player.id, player]));
-        lineup = (lineupData || [])
-          .map((entry: any) => (Array.isArray(entry.player) ? entry.player[0] : entry.player))
-          .filter(Boolean)
-          .map((player: Player) => squadMap.get(player.id) || player);
+        const combinedSlots = createEmptyLineupSlots(TOTAL_LINEUP_SLOT_COUNT);
+        for (const entry of lineupData || []) {
+          const player = Array.isArray((entry as any).player) ? (entry as any).player[0] : (entry as any).player;
+          const slotIndex = Number((entry as any).slot_index);
+          if (!player || !Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= TOTAL_LINEUP_SLOT_COUNT) {
+            continue;
+          }
+          combinedSlots[slotIndex] = squadMap.get(player.id) || player;
+        }
+
+        lineupSlots = combinedSlots.slice(0, MAIN_LINEUP_SLOT_COUNT);
+        reserveSlots = combinedSlots.slice(RESERVE_SLOT_START_INDEX);
       }
 
-      setTeamInspection({ team, squad, lineup });
+      setTeamInspection({ team, squad, lineupSlots, reserveSlots });
     } catch (error) {
       console.error('Failed to inspect team:', error);
-      setTeamInspection({ team, squad: [], lineup: [] });
+      setTeamInspection({
+        team,
+        squad: [],
+        lineupSlots: createEmptyLineupSlots(MAIN_LINEUP_SLOT_COUNT),
+        reserveSlots: createEmptyLineupSlots(RESERVE_LINEUP_SLOT_COUNT),
+      });
     } finally {
       setTeamInspectionLoading(false);
     }
@@ -1192,6 +1338,7 @@ const loadAuctions = async () => {
     (teamPlayer) => !lineupSlots.some((slotPlayer) => slotPlayer?.id === teamPlayer.id)
   );
   const isLineupLocked = activeTournament?.status === 'on-going';
+  const reserveLineupSlots = lineupSlots.slice(RESERVE_SLOT_START_INDEX);
   const inspectionLineupPositions = [
     'left-3 top-4 sm:left-8 sm:top-6',
     'right-3 top-4 sm:right-8 sm:top-6',
@@ -1304,13 +1451,16 @@ const loadAuctions = async () => {
           <ul className="space-y-4">
             {auctions.map(auction => {
               const probInfo = getProbabilityIcon(auction.appearance_probability);
+              const isWildcard = Boolean(auction.is_wildcard);
               const remaining = getRemainingTime(auction.end_time);
               const isOwnSale = auction.seller_team_id === myTeamId;
               const isPlayerSale = !!auction.seller_team_id;
+              const isManagerOffer = isPlayerSale;
+              const isPcOffer = !isPlayerSale;
               return (
                 <li
                   key={auction.id}
-                  className={`p-4 rounded-xl shadow-sm border ${isOwnSale ? 'bg-orange-50 border-orange-200' : 'bg-white border-zinc-100'}`}
+                  className={`p-4 rounded-xl shadow-sm border ${isOwnSale ? 'bg-orange-50 border-orange-200' : isManagerOffer ? 'bg-amber-50 border-amber-200' : isPcOffer ? 'bg-white border-zinc-100' : 'bg-white border-zinc-100'}`}
                 >
                   <div className="flex justify-between mb-2">
                     <button
@@ -1322,34 +1472,57 @@ const loadAuctions = async () => {
                         country: auction.player.country,
                         image_url: auction.player.image_url,
                       })}
-                      className="flex items-center gap-2 text-left hover:opacity-80"
+                      className="flex flex-col items-start gap-1 text-left hover:opacity-80"
                     >
-                      <img
-                        src={auction.player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
-                        alt={`${auction.player.first_name} ${auction.player.last_name}`}
-                        className="w-10 h-10 rounded-full object-cover"
-                      />
-                      <span className="font-medium underline decoration-zinc-300">{auction.player.first_name} {auction.player.last_name}</span>
-                      <span 
-                        className={`text-lg ${probInfo.color}`} 
-                        title={probInfo.label}
-                      >
-                        {probInfo.icon}
-                      </span>
-                      {isPlayerSale && auction.seller_team_image_url && (
+                      <div className="flex items-center gap-2">
                         <img
-                          src={auction.seller_team_image_url}
-                          alt="Manager"
-                          className="w-7 h-7 rounded-full object-cover border border-zinc-300"
+                          src={auction.player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
+                          alt={`${auction.player.first_name} ${auction.player.last_name}`}
+                          className="w-10 h-10 rounded-full object-cover"
                         />
-                      )}
-                      {isOwnSale && (
-                        <span className="text-xs px-2 py-1 rounded-md bg-orange-100 text-orange-700 font-medium">Dein Angebot</span>
+                        <span className="font-medium underline decoration-zinc-300">{auction.player.first_name}</span>
+                        {isWildcard ? (
+                          <span
+                            className="inline-flex items-center rounded-md bg-emerald-900 px-2 py-0.5 text-xs font-bold text-emerald-50"
+                            title="Wildcard"
+                          >
+                            WC
+                          </span>
+                        ) : (
+                          <span 
+                            className={`text-lg ${probInfo.color}`} 
+                            title={probInfo.label}
+                          >
+                            {probInfo.icon}
+                          </span>
+                        )}
+                        {isPlayerSale && (
+                          <span className="inline-flex items-center gap-1.5 ml-1 text-xs text-zinc-600">
+                            {auction.seller_team_image_url && (
+                              <img
+                                src={auction.seller_team_image_url}
+                                alt={auction.seller_team_name || 'Manager'}
+                                className="w-7 h-7 rounded-full object-cover border border-zinc-300"
+                              />
+                            )}
+                            <span className="font-medium text-zinc-700">{auction.seller_team_name || 'Manager-Angebot'}</span>
+                          </span>
+                        )}
+                      </div>
+                      {isManagerOffer && (
+                        <div className="pl-12 text-xs font-medium text-zinc-700">
+                          <span className="text-emerald-700">Marktwert: {auction.market_value}€</span>
+                          <span className="mx-2 text-zinc-400">•</span>
+                          <span className={remaining.urgent ? 'text-red-700 font-semibold' : 'text-zinc-600'}>
+                            Restlaufzeit: {remaining.label}
+                          </span>
+                        </div>
                       )}
                     </button>
                     <div className="flex items-center gap-4">
-                      <span className="text-zinc-500">Ranking: {auction.player.ranking}</span>
-                      <span className="font-semibold text-emerald-600">Marktwert: {auction.market_value}€</span>
+                      {!isManagerOffer && (
+                        <span className="font-semibold text-emerald-600">Marktwert: {auction.market_value}€</span>
+                      )}
                     </div>
                   </div>
                   <div className="flex justify-between items-center">
@@ -1368,23 +1541,32 @@ const loadAuctions = async () => {
                     ) : (
                       <span />
                     )}
-                    <span className={`text-sm px-2 py-1 rounded-md ${remaining.urgent ? 'bg-red-100 text-red-700 font-semibold' : 'text-zinc-600 bg-zinc-100'}`}>
-                      Restlaufzeit: {remaining.label}
-                    </span>
+                    {!isManagerOffer && (
+                      <span className={`text-sm px-2 py-1 rounded-md ${remaining.urgent ? 'bg-red-100 text-red-700 font-semibold' : 'text-zinc-600 bg-zinc-100'}`}>
+                        Restlaufzeit: {remaining.label}
+                      </span>
+                    )}
                   </div>
-                  {Number(auction.highest_bid || 0) > 0 && !auction.my_bid && (
-                    <div className="mt-2 text-sm text-zinc-600">
-                      Höchstgebot: <span className="font-semibold text-zinc-900">{Number(auction.highest_bid || 0).toLocaleString('de-DE')}€</span>
-                    </div>
-                  )}
-                  {isOwnSale && !!auction.highest_bidder_id && Number(auction.highest_bid || 0) > 0 && (
-                    <div className="mt-3">
-                      <button
-                        onClick={() => acceptHighestBid(auction.id)}
-                        className="text-xs px-3 py-1.5 rounded-md border border-emerald-300 text-emerald-700 hover:bg-emerald-50"
-                      >
-                        Hoechstes Gebot annehmen
-                      </button>
+                  {isOwnSale && (auction.incoming_bids?.length || 0) > 0 && (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-sm font-medium text-zinc-700">Eingegangene Gebote</p>
+                      <ul className="space-y-2">
+                        {(auction.incoming_bids || []).map((bid) => (
+                          <li key={`${auction.id}-${bid.team_id}`} className="flex items-center justify-between gap-3 rounded-md border border-zinc-200 bg-white/70 px-3 py-2">
+                            <div className="text-sm text-zinc-700">
+                              <span className="font-semibold text-zinc-900">{bid.bid_amount.toLocaleString('de-DE')}€</span>
+                              <span> von </span>
+                              <span className="font-semibold text-zinc-900">{bid.team_name}</span>
+                            </div>
+                            <button
+                              onClick={() => acceptHighestBid(auction.id, bid.team_id)}
+                              className="text-xs px-3 py-1.5 rounded-md border border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+                            >
+                              Angebot annehmen
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
                     </div>
                   )}
                   {isOwnSale && (
@@ -1429,6 +1611,7 @@ const loadAuctions = async () => {
           <ul className="space-y-2">
             {myTeam.map(player => {
               const probInfo = getProbabilityIcon(player.appearance_probability);
+              const isWildcard = Boolean(player.is_wildcard);
               const marketValue = playerMarketValues.get(player.id) || 0;
               return (
                 <li
@@ -1445,12 +1628,21 @@ const loadAuctions = async () => {
                       className="w-10 h-10 rounded-full object-cover shrink-0"
                     />
                     <span className="underline decoration-zinc-300">{player.first_name} {player.last_name}</span>
-                    <span 
-                      className={`text-lg ${probInfo.color}`} 
-                      title={probInfo.label}
-                    >
-                      {probInfo.icon}
-                    </span>
+                    {isWildcard ? (
+                      <span
+                        className="inline-flex items-center rounded-md bg-emerald-900 px-2 py-0.5 text-xs font-bold text-emerald-50"
+                        title="Wildcard"
+                      >
+                        WC
+                      </span>
+                    ) : (
+                      <span 
+                        className={`text-lg ${probInfo.color}`} 
+                        title={probInfo.label}
+                      >
+                        {probInfo.icon}
+                      </span>
+                    )}
                   </button>
                   <div className="flex items-center justify-between gap-3 sm:justify-end">
                     <div className="flex items-center gap-2 text-sm">
@@ -1476,7 +1668,10 @@ const loadAuctions = async () => {
       )}
 
       {activeTab === 'tournaments' && (
-        <div className={isLineupEditMode ? 'pb-48 sm:pb-40' : ''}>
+        <div
+          ref={lineupEditorScrollRef}
+          className={isLineupEditMode ? 'max-h-[calc(100vh-10rem)] overflow-y-auto overscroll-contain pb-80 pr-1 touch-pan-y sm:max-h-[calc(100vh-12rem)] sm:pb-48' : ''}
+        >
           {isLineupEditMode && (
             <button
               onClick={closeLineupEditMode}
@@ -1547,7 +1742,7 @@ const loadAuctions = async () => {
                     Bearbeitungsmodus ist waehrend eines laufenden Turniers deaktiviert.
                   </div>
                 )}
-                <div className={`relative rounded-xl h-[420px] sm:h-[480px] border-4 border-white overflow-hidden ${isLineupEditMode ? 'touch-none' : ''}`}>
+                <div className={`relative rounded-xl ${isLineupEditMode ? 'h-[320px] sm:h-[420px]' : 'h-[420px] sm:h-[480px]'} border-4 border-white overflow-hidden ${isLineupEditMode ? 'touch-none' : ''}`}>
                   <div className="absolute inset-x-0 top-1/2 border-t-4 border-white" />
                   <div className="absolute top-0 bottom-0 left-[14%] border-l-4 border-white" />
                   <div className="absolute top-0 bottom-0 right-[14%] border-r-4 border-white" />
@@ -1599,19 +1794,93 @@ const loadAuctions = async () => {
                                 handleSlotPlayerTap(slotIndex);
                               }}
                               className={`cursor-grab active:cursor-grabbing ${selectedFromSlot === slotIndex ? 'ring-2 ring-emerald-400 rounded-lg' : ''}`}
-                              title={`${player.first_name} ${player.last_name}`}
+                              title={formatLineupPlayerName(player)}
                             >
                               <img
                                 src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                                 alt={`${player.first_name} ${player.last_name}`}
                                 className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-zinc-200'}`}
                               />
-                              <p className="text-xs font-semibold mt-1">{player.first_name.charAt(0)}. {player.last_name}</p>
-                              <p className="text-xs text-emerald-600 font-bold">{playerTournamentPoints.get(player.id) || 0} Pkt</p>
+                              <p className="text-xs font-semibold mt-1">{formatLineupPlayerName(player)}</p>
+                              <p className="text-xs text-emerald-600 font-bold">{getDisplayedLineupPoints(player, slotIndex)} Pkt</p>
                               <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-sky-700'}`}>{roundLabel}</p>
                             </div>
                           ) : (
                             <p className="text-xs text-zinc-500">Slot {slotIndex + 1}</p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div
+                className={`rounded-2xl p-4 sm:p-5 shadow-md mb-5 border ${isLineupLocked ? 'bg-pink-300 border-pink-200' : 'bg-pink-100 border-pink-200'} ${!isLineupEditMode && !isLineupLocked ? 'cursor-pointer' : ''}`}
+                onClick={() => {
+                  if (!isLineupEditMode && !isLineupLocked) {
+                    setIsLineupEditMode(true);
+                  }
+                }}
+              >
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <div>
+                    <h3 className="font-semibold text-pink-900">New Comer</h3>
+                  </div>
+                </div>
+                <div className={`grid grid-cols-2 ${isLineupEditMode ? 'gap-2 touch-none' : 'gap-3'}`}>
+                  {reserveLineupSlots.map((player, reserveIndex) => {
+                    const slotIndex = RESERVE_SLOT_START_INDEX + reserveIndex;
+                    const roundState = player ? playerRoundStates.get(player.id) : undefined;
+                    const roundLabel = roundState?.label || 'R1/R2';
+                    const highlightActive = Boolean(
+                      player
+                      && activeTournament?.status === 'on-going'
+                      && (roundState ? roundState.inTournament : true)
+                    );
+
+                    return (
+                      <div
+                        key={slotIndex}
+                        className="min-h-28"
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={() => handleDropOnSlot(slotIndex)}
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          await handleSlotTapForPlacement(slotIndex);
+                        }}
+                        data-lineup-slot-index={slotIndex}
+                      >
+                        <div className="h-full rounded-xl border-2 border-dashed border-pink-300 bg-white/85 p-3 text-center">
+                          {player ? (
+                            <div
+                              draggable={isLineupEditMode}
+                              onDragStart={() => handleDragStartFromSlot(slotIndex)}
+                              onTouchStart={(e) => startTouchDragCandidate(player.id, slotIndex, e)}
+                              onTouchMove={handleTouchMoveForDrag}
+                              onTouchEnd={endTouchDrag}
+                              onTouchCancel={handleTouchCancelDrag}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleSlotPlayerTap(slotIndex);
+                              }}
+                              className={`cursor-grab active:cursor-grabbing ${selectedFromSlot === slotIndex ? 'ring-2 ring-emerald-400 rounded-lg' : ''}`}
+                              title={formatLineupPlayerName(player)}
+                            >
+                              <img
+                                src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
+                                alt={`${player.first_name} ${player.last_name}`}
+                                className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-pink-200'}`}
+                              />
+                              <p className="text-xs font-semibold mt-1 text-pink-950">{formatLineupPlayerName(player)}</p>
+                              <p className="text-xs text-emerald-600 font-bold">{getDisplayedLineupPoints(player, slotIndex)} Pkt</p>
+                              <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-pink-700'}`}>{roundLabel}</p>
+                            </div>
+                          ) : (
+                            <div className="pt-5">
+                              <p className="text-xs font-semibold text-pink-700">Reserve {reserveIndex + 1}</p>
+                              <p className="text-xs text-pink-500 mt-1">Nur Ranking &gt; {RESERVE_ELIGIBLE_RANKING_THRESHOLD}</p>
+                            </div>
                           )}
                         </div>
                       </div>
@@ -1638,6 +1907,7 @@ const loadAuctions = async () => {
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {notInLineupPlayers.map((player) => {
                       const probInfo = getProbabilityIcon(player.appearance_probability);
+                      const isWildcard = Boolean(player.is_wildcard);
                       return (
                         <div
                           key={player.id}
@@ -1660,9 +1930,18 @@ const loadAuctions = async () => {
                                 alt={`${player.first_name} ${player.last_name}`}
                                 className="w-8 h-8 rounded-full object-cover"
                               />
-                              <span className="font-medium text-zinc-900">{player.first_name} {player.last_name}</span>
+                              <span className="font-medium text-zinc-900">{formatLineupPlayerName(player)}</span>
                             </div>
-                            <span className={`text-lg ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
+                            {isWildcard ? (
+                              <span
+                                className="inline-flex items-center rounded-md bg-emerald-900 px-2 py-0.5 text-xs font-bold text-emerald-50"
+                                title="Wildcard"
+                              >
+                                WC
+                              </span>
+                            ) : (
+                              <span className={`text-lg ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
+                            )}
                           </div>
                           <p className="text-xs text-zinc-500 mt-1">#{player.ranking} - {player.country}</p>
                         </div>
@@ -1695,6 +1974,7 @@ const loadAuctions = async () => {
                     <div className="flex gap-2 overflow-x-auto pb-1 touch-pan-x">
                       {notInLineupPlayers.map((player) => {
                         const probInfo = getProbabilityIcon(player.appearance_probability);
+                        const isWildcard = Boolean(player.is_wildcard);
                         return (
                           <div
                             key={`edit-tray-${player.id}`}
@@ -1717,9 +1997,18 @@ const loadAuctions = async () => {
                                   alt={`${player.first_name} ${player.last_name}`}
                                   className="w-8 h-8 rounded-full object-cover"
                                 />
-                                <span className="font-medium text-zinc-900 truncate text-sm">{player.first_name} {player.last_name}</span>
+                                <span className="font-medium text-zinc-900 truncate text-sm">{formatLineupPlayerName(player)}</span>
                               </div>
-                              <span className={`text-base ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
+                              {isWildcard ? (
+                                <span
+                                  className="inline-flex items-center rounded-md bg-emerald-900 px-2 py-0.5 text-xs font-bold text-emerald-50"
+                                  title="Wildcard"
+                                >
+                                  WC
+                                </span>
+                              ) : (
+                                <span className={`text-base ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
+                              )}
                             </div>
                             <p className="text-xs text-zinc-500 mt-1">#{player.ranking} - {player.country}</p>
                           </div>
@@ -1774,6 +2063,9 @@ const loadAuctions = async () => {
               <h3 className="text-lg font-semibold">
                 Matchhistorie: {historyPlayer.first_name} {historyPlayer.last_name}
               </h3>
+              <span className="text-sm px-2 py-1 rounded-md bg-zinc-100 text-zinc-700 font-medium">
+                Ranking #{historyPlayer.ranking}
+              </span>
               <button
                 onClick={() => setHistoryPlayer(null)}
                 className="px-3 py-1 rounded-lg border border-zinc-300 hover:bg-zinc-50"
@@ -1854,58 +2146,107 @@ const loadAuctions = async () => {
 
                   {!activeTournament ? (
                     <p className="text-sm text-zinc-500">Derzeit gibt es kein aktives Turnier.</p>
-                  ) : teamInspection.lineup.length === 0 ? (
+                  ) : teamInspection.lineupSlots.every((player) => !player) && teamInspection.reserveSlots.every((player) => !player) ? (
                     <p className="text-sm text-zinc-500">Dieses Team hat aktuell keine Aufstellung hinterlegt.</p>
                   ) : (
-                    <div className="bg-sky-300 rounded-2xl p-4 sm:p-6 shadow-md border border-sky-200">
-                      <div className="relative rounded-xl h-[360px] sm:h-[420px] border-4 border-white overflow-hidden">
-                        <div className="absolute inset-x-0 top-1/2 border-t-4 border-white" />
-                        <div className="absolute top-0 bottom-0 left-[14%] border-l-4 border-white" />
-                        <div className="absolute top-0 bottom-0 right-[14%] border-r-4 border-white" />
-                        <div className="absolute left-[14%] right-[14%] top-[30%] border-t-4 border-white" />
-                        <div className="absolute left-[14%] right-[14%] bottom-[30%] border-b-4 border-white" />
-                        <div className="absolute left-1/2 -translate-x-1/2 top-[30%] bottom-[30%] border-l-4 border-white" />
-                        <div className="absolute left-[14%] right-[14%] top-1/2 h-1 bg-white" />
+                    <div className="space-y-4">
+                      <div className="bg-sky-300 rounded-2xl p-4 sm:p-6 shadow-md border border-sky-200">
+                        <div className="relative rounded-xl h-[360px] sm:h-[420px] border-4 border-white overflow-hidden">
+                          <div className="absolute inset-x-0 top-1/2 border-t-4 border-white" />
+                          <div className="absolute top-0 bottom-0 left-[14%] border-l-4 border-white" />
+                          <div className="absolute top-0 bottom-0 right-[14%] border-r-4 border-white" />
+                          <div className="absolute left-[14%] right-[14%] top-[30%] border-t-4 border-white" />
+                          <div className="absolute left-[14%] right-[14%] bottom-[30%] border-b-4 border-white" />
+                          <div className="absolute left-1/2 -translate-x-1/2 top-[30%] bottom-[30%] border-l-4 border-white" />
+                          <div className="absolute left-[14%] right-[14%] top-1/2 h-1 bg-white" />
 
-                        {[0, 1, 2, 3, 4].map((slotIndex) => {
-                          const player = teamInspection.lineup[slotIndex] || null;
-                          const roundState = player ? playerRoundStates.get(player.id) : undefined;
-                          const roundLabel = roundState?.label || 'R1/R2';
-                          const highlightActive = Boolean(
-                            player
-                            && activeTournament?.status === 'on-going'
-                            && (roundState ? roundState.inTournament : true)
-                          );
+                          {[0, 1, 2, 3, 4].map((slotIndex) => {
+                            const player = teamInspection.lineupSlots[slotIndex] || null;
+                            const roundState = player ? playerRoundStates.get(player.id) : undefined;
+                            const roundLabel = roundState?.label || 'R1/R2';
+                            const highlightActive = Boolean(
+                              player
+                              && activeTournament?.status === 'on-going'
+                              && (roundState ? roundState.inTournament : true)
+                            );
 
-                          return (
-                            <div
-                              key={slotIndex}
-                              className={`absolute ${inspectionLineupPositions[slotIndex]} w-28 sm:w-32`}
-                            >
-                              <div className="rounded-xl border-2 border-dashed border-white/70 bg-white/90 min-h-24 p-2 text-center">
+                            return (
+                              <div
+                                key={slotIndex}
+                                className={`absolute ${inspectionLineupPositions[slotIndex]} w-28 sm:w-32`}
+                              >
+                                <div className="rounded-xl border-2 border-dashed border-white/70 bg-white/90 min-h-24 p-2 text-center">
+                                  {player ? (
+                                    <button
+                                      onClick={() => openPlayerHistory(player)}
+                                      className="w-full text-center hover:opacity-85"
+                                      title={formatLineupPlayerName(player)}
+                                    >
+                                      <img
+                                        src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
+                                        alt={`${player.first_name} ${player.last_name}`}
+                                        className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-zinc-200'}`}
+                                      />
+                                      <p className="text-xs font-semibold mt-1">{formatLineupPlayerName(player)}</p>
+                                      <p className="text-xs text-zinc-500">#{player.ranking}</p>
+                                      <p className="text-xs text-emerald-600 font-bold">{getDisplayedLineupPoints(player, slotIndex)} Pkt</p>
+                                      <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-sky-700'}`}>{roundLabel}</p>
+                                    </button>
+                                  ) : (
+                                    <p className="text-xs text-zinc-500 pt-7">Freier Slot</p>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="bg-pink-100 rounded-2xl p-4 shadow-md border border-pink-200">
+                        <div className="flex items-start justify-between gap-3 mb-3">
+                          <div>
+                            <h5 className="font-semibold text-pink-900">New Comer</h5>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          {teamInspection.reserveSlots.map((player, reserveIndex) => {
+                            const slotIndex = RESERVE_SLOT_START_INDEX + reserveIndex;
+                            const roundState = player ? playerRoundStates.get(player.id) : undefined;
+                            const roundLabel = roundState?.label || 'R1/R2';
+                            const highlightActive = Boolean(
+                              player
+                              && activeTournament?.status === 'on-going'
+                              && (roundState ? roundState.inTournament : true)
+                            );
+
+                            return (
+                              <div key={slotIndex} className="rounded-xl border-2 border-dashed border-pink-300 bg-white/90 min-h-24 p-2 text-center">
                                 {player ? (
                                   <button
                                     onClick={() => openPlayerHistory(player)}
                                     className="w-full text-center hover:opacity-85"
-                                    title={`${player.first_name} ${player.last_name}`}
+                                    title={formatLineupPlayerName(player)}
                                   >
                                     <img
                                       src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                                       alt={`${player.first_name} ${player.last_name}`}
-                                      className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-zinc-200'}`}
+                                      className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-pink-200'}`}
                                     />
-                                    <p className="text-xs font-semibold mt-1">{player.first_name.charAt(0)}. {player.last_name}</p>
+                                    <p className="text-xs font-semibold mt-1 text-pink-950">{formatLineupPlayerName(player)}</p>
                                     <p className="text-xs text-zinc-500">#{player.ranking}</p>
-                                    <p className="text-xs text-emerald-600 font-bold">{playerTournamentPoints.get(player.id) || 0} Pkt</p>
-                                    <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-sky-700'}`}>{roundLabel}</p>
+                                    <p className="text-xs text-emerald-600 font-bold">{getDisplayedLineupPoints(player, slotIndex)} Pkt</p>
+                                    <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-pink-700'}`}>{roundLabel}</p>
                                   </button>
                                 ) : (
-                                  <p className="text-xs text-zinc-500 pt-7">Freier Slot</p>
+                                  <div className="pt-5">
+                                    <p className="text-xs font-semibold text-pink-700">Reserve {reserveIndex + 1}</p>
+                                    <p className="text-xs text-pink-500 mt-1">Freier Slot</p>
+                                  </div>
                                 )}
                               </div>
-                            </div>
-                          );
-                        })}
+                            );
+                          })}
+                        </div>
                       </div>
                     </div>
                   )}
@@ -1919,7 +2260,9 @@ const loadAuctions = async () => {
                     <ul className="space-y-2">
                       {teamInspection.squad.map((player) => {
                         const probInfo = getProbabilityIcon(player.appearance_probability);
-                        const isInLineup = teamInspection.lineup.some((lineupPlayer) => lineupPlayer.id === player.id);
+                        const isWildcard = Boolean(player.is_wildcard);
+                        const isInLineup = [...teamInspection.lineupSlots, ...teamInspection.reserveSlots]
+                          .some((lineupPlayer) => lineupPlayer?.id === player.id);
                         return (
                           <li key={player.id}>
                             <button
@@ -1945,7 +2288,16 @@ const loadAuctions = async () => {
                                     Aufgestellt
                                   </span>
                                 )}
-                                <span className={`text-lg ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
+                                {isWildcard ? (
+                                  <span
+                                    className="inline-flex items-center rounded-md bg-emerald-900 px-2 py-0.5 text-xs font-bold text-emerald-50"
+                                    title="Wildcard"
+                                  >
+                                    WC
+                                  </span>
+                                ) : (
+                                  <span className={`text-lg ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
+                                )}
                                 <span className="text-sm font-semibold text-emerald-600">
                                   {playerTournamentPoints.get(player.id) || 0} Pkt
                                 </span>
@@ -2015,9 +2367,9 @@ const loadAuctions = async () => {
             </div>
 
             <p className="text-xs text-zinc-500 mt-4 text-center">
-              Bei "Direkt verkaufen" erhältst Du sofort den Marktwert und der Spieler wird vom Markt aufgenommen.
+              Bei &quot;Direkt verkaufen&quot; erhältst Du sofort den Marktwert und der Spieler wird vom Markt aufgenommen.
               <br />
-              Bei "Anbieten" können andere Manager Gebote abgeben, Du kannst aber auch jederzeit zum Marktwert verkaufen.
+              Bei &quot;Anbieten&quot; können andere Manager Gebote abgeben, Du kannst aber auch jederzeit zum Marktwert verkaufen.
             </p>
           </div>
         </div>

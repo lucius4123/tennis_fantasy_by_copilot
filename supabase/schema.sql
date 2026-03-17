@@ -216,7 +216,9 @@ CREATE TABLE tournament_players (
     tournament_id UUID REFERENCES tournaments(id) ON DELETE CASCADE,
     player_id UUID REFERENCES players(id) ON DELETE CASCADE,
     appearance_probability TEXT NOT NULL CHECK (appearance_probability IN ('Garantiert', 'Sehr Wahrscheinlich', 'Wahrscheinlich', 'Riskant', 'Sehr Riskant', 'Ausgeschlossen')),
+    is_wildcard BOOLEAN NOT NULL DEFAULT false,
     market_value DECIMAL(10,2) DEFAULT 0,
+    CHECK (NOT is_wildcard OR appearance_probability = 'Garantiert'),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     UNIQUE(tournament_id, player_id)
 );
@@ -236,7 +238,9 @@ CREATE TABLE tournament_lineups (
     tournament_id UUID REFERENCES tournaments(id) ON DELETE CASCADE,
     team_id UUID REFERENCES fantasy_teams(id) ON DELETE CASCADE,
     player_id UUID REFERENCES players(id) ON DELETE CASCADE,
-    PRIMARY KEY (tournament_id, team_id, player_id)
+    slot_index SMALLINT NOT NULL CHECK (slot_index BETWEEN 0 AND 6),
+    PRIMARY KEY (tournament_id, team_id, player_id),
+    UNIQUE (tournament_id, team_id, slot_index)
 );
 
 -- RLS for tournament_lineups
@@ -251,6 +255,27 @@ CREATE POLICY "Users can view lineups in their leagues" ON tournament_lineups FO
 CREATE POLICY "Users can manage their own lineups" ON tournament_lineups FOR ALL USING (
     EXISTS (SELECT 1 FROM fantasy_teams WHERE fantasy_teams.id = tournament_lineups.team_id AND fantasy_teams.user_id = auth.uid())
 );
+
+CREATE OR REPLACE FUNCTION validate_tournament_lineup_slot()
+RETURNS TRIGGER AS $$
+DECLARE
+    player_ranking INT;
+BEGIN
+    IF NEW.slot_index >= 5 THEN
+        SELECT ranking INTO player_ranking FROM players WHERE id = NEW.player_id;
+
+        IF player_ranking IS NULL OR player_ranking <= 75 THEN
+            RAISE EXCEPTION 'Reserve slots allow only players with ranking worse than 75';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER validate_tournament_lineup_slot_before_write
+    BEFORE INSERT OR UPDATE ON tournament_lineups
+    FOR EACH ROW EXECUTE FUNCTION validate_tournament_lineup_slot();
 
 -- Trigger to prevent player from being in both team_players and market_auctions for the same league
 CREATE OR REPLACE FUNCTION check_player_assignment()

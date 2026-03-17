@@ -118,7 +118,7 @@ export async function POST(request: NextRequest) {
     // Step 6: Get all lineups for this tournament
     const { data: lineups, error: lineupsError } = await supabase
       .from('tournament_lineups')
-      .select('team_id, player_id')
+      .select('team_id, player_id, slot_index')
       .eq('tournament_id', tournamentId)
 
     if (lineupsError) {
@@ -128,7 +128,8 @@ export async function POST(request: NextRequest) {
     // Step 7: Calculate points per team
     const teamPoints = new Map<string, number>()
     for (const lineup of lineups || []) {
-      const points = playerPoints.get(lineup.player_id) || 0
+      const playerTotalPoints = playerPoints.get(lineup.player_id) || 0
+      const points = Number(lineup.slot_index) >= 5 ? Math.max(playerTotalPoints, 0) : playerTotalPoints
       const currentTeamPoints = teamPoints.get(lineup.team_id) || 0
       teamPoints.set(lineup.team_id, currentTeamPoints + points)
     }

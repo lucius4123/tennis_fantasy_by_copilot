@@ -32,6 +32,7 @@ interface TournamentPlayer {
   tournament_id: string
   player_id: string
   appearance_probability: string
+  is_wildcard?: boolean
   market_value?: number
   player?: Player
 }
@@ -199,7 +200,10 @@ export default function AdminPage() {
       return
     }
 
-    const normalized = payload.tournamentPlayers || []
+    const normalized = (payload.tournamentPlayers || []).map((tp: TournamentPlayer) => ({
+      ...tp,
+      is_wildcard: Boolean(tp.is_wildcard),
+    }))
     setTournamentPlayers(normalized)
     setOriginalTournamentPlayers(normalized)
     setHasUnsavedChanges(false)
@@ -299,6 +303,7 @@ export default function AdminPage() {
         tournament_id: selectedTournament.id,
         player_id: playerId,
         appearance_probability: 'Wahrscheinlich',
+        is_wildcard: false,
         market_value: 0,
         player: selectedPlayer,
       },
@@ -309,7 +314,30 @@ export default function AdminPage() {
 
   const updatePlayerProbability = (tournamentPlayerId: string, probability: string) => {
     setTournamentPlayers((prev) =>
-      prev.map((tp) => (tp.id === tournamentPlayerId ? { ...tp, appearance_probability: probability } : tp))
+      prev.map((tp) =>
+        tp.id === tournamentPlayerId
+          ? {
+              ...tp,
+              appearance_probability: probability,
+              is_wildcard: probability === 'Garantiert' ? tp.is_wildcard : false,
+            }
+          : tp
+      )
+    )
+    setHasUnsavedChanges(true)
+  }
+
+  const updatePlayerWildcard = (tournamentPlayerId: string, isWildcard: boolean) => {
+    setTournamentPlayers((prev) =>
+      prev.map((tp) =>
+        tp.id === tournamentPlayerId
+          ? {
+              ...tp,
+              is_wildcard: isWildcard,
+              appearance_probability: isWildcard ? 'Garantiert' : tp.appearance_probability,
+            }
+          : tp
+      )
     )
     setHasUnsavedChanges(true)
   }
@@ -424,7 +452,11 @@ export default function AdminPage() {
         const changedItems = tournamentPlayers.filter((tp) => {
           if (tp.id.startsWith('temp-')) return false
           const original = originalById.get(tp.id)
-          return original && (original.appearance_probability !== tp.appearance_probability || original.market_value !== tp.market_value)
+          return original && (
+            original.appearance_probability !== tp.appearance_probability ||
+            original.market_value !== tp.market_value ||
+            Boolean(original.is_wildcard) !== Boolean(tp.is_wildcard)
+          )
         })
 
         for (const item of changedItems) {
@@ -436,6 +468,9 @@ export default function AdminPage() {
           }
           if (original && original.market_value !== item.market_value) {
             updatePayload.market_value = item.market_value
+          }
+          if (original && Boolean(original.is_wildcard) !== Boolean(item.is_wildcard)) {
+            updatePayload.is_wildcard = Boolean(item.is_wildcard)
           }
 
           const response = await fetch(`/api/admin/tournament-players/${item.id}`, {
@@ -458,6 +493,7 @@ export default function AdminPage() {
               player_id: item.player_id,
               appearance_probability: item.appearance_probability,
               market_value: item.market_value || 0,
+              is_wildcard: Boolean(item.is_wildcard),
             }),
           })
           const payload = await response.json()
@@ -963,17 +999,29 @@ export default function AdminPage() {
                           </button>
                         </div>
                         <div>
+                          <div className="mb-3">
+                            <label className="flex items-center gap-2 text-xs font-medium text-zinc-700 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(tp.is_wildcard)}
+                                onChange={(e) => updatePlayerWildcard(tp.id, e.target.checked)}
+                                className="h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500"
+                              />
+                              Wildcard (erzwingt Garantiert)
+                            </label>
+                          </div>
                           <label className="block text-xs font-medium text-zinc-600 mb-2">Auftrittswahrscheinlichkeit</label>
                           <div className="grid grid-cols-2 gap-2">
                             {probabilityOptions.map((option) => (
                               <button
                                 key={option}
                                 onClick={() => updatePlayerProbability(tp.id, option)}
+                                disabled={Boolean(tp.is_wildcard)}
                                 className={`px-3 py-2 rounded-lg text-xs font-medium border-2 transition-all ${
                                   tp.appearance_probability === option
                                     ? probabilityColors[option]
                                     : 'border-zinc-200 text-zinc-600 hover:border-zinc-300'
-                                }`}
+                                } ${Boolean(tp.is_wildcard) ? 'opacity-60 cursor-not-allowed' : ''}`}
                               >
                                 {option}
                               </button>

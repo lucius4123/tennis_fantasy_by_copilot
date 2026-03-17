@@ -19,6 +19,7 @@ export async function POST(request: Request) {
     const body = await request.json()
     const auctionId = body?.auctionId as string
     const leagueId = body?.leagueId as string
+    const bidderTeamId = body?.bidderTeamId as string | undefined
 
     if (!auctionId || !leagueId) {
       return NextResponse.json({ error: 'Invalid request payload' }, { status: 400 })
@@ -68,8 +69,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Failed to load bids' }, { status: 500 })
     }
 
-    const winnerBid = bids?.[0] || null
+    const winnerBid = bidderTeamId
+      ? (bids || []).find((bid: any) => bid.team_id === bidderTeamId) || null
+      : bids?.[0] || null
+
     if (!winnerBid) {
+      if (bidderTeamId) {
+        return NextResponse.json({ error: 'Das ausgewählte Gebot wurde nicht gefunden' }, { status: 400 })
+      }
       return NextResponse.json({ error: 'Es liegt noch kein Gebot vor' }, { status: 400 })
     }
 

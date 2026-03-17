@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient as createServerAuthClient } from '@/utils/supabase/server'
 import { createAdminClient } from '@/lib/transfer-market'
 
-const MAX_FILE_SIZE_BYTES = 1024 * 1024
+const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024
 
 export async function POST(request: NextRequest) {
   try {
@@ -29,7 +29,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (file.size > MAX_FILE_SIZE_BYTES) {
-      return NextResponse.json({ error: 'Datei ist größer als 1MB' }, { status: 400 })
+      return NextResponse.json({ error: 'Datei ist größer als 2MB' }, { status: 400 })
     }
 
     const { data: team, error: teamError } = await supabase

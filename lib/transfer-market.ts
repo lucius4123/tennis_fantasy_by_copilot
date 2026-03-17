@@ -298,7 +298,8 @@ async function resolveExpiredAuctionsForLeague(supabase: AdminClient, leagueId: 
 
     const winnerBid = bids?.[0] || null
     const winnerTeamId = winnerBid?.team_id || auction.highest_bidder_id || null
-    const winningAmount = Number(winnerBid?.bid_amount || auction.highest_bid || 0)
+    const rawWinningAmount = Number(winnerBid?.bid_amount || auction.highest_bid || 0)
+    const winningAmount = Number.isFinite(rawWinningAmount) ? rawWinningAmount : 0
     const isPlayerSale = !!auction.seller_team_id
 
     // Remove bids + auction first so DB trigger allows assigning player to team.
@@ -369,74 +370,88 @@ async function resolveExpiredAuctionsForLeague(supabase: AdminClient, leagueId: 
         }
       }
 
+      const { data: winnerTeam, error: winnerTeamError } = await supabase
+        .from('fantasy_teams')
+        .select('id, name, budget')
+        .eq('id', winnerTeamId)
+        .single()
+
+      if (winnerTeamError || !winnerTeam) {
+        throw winnerTeamError || new Error('Winner team not found during auction resolution')
+      }
+
       if (winningAmount > 0) {
-        const { data: winnerTeam } = await supabase
+        const nextBudget = Math.max(0, Number(winnerTeam.budget || 0) - winningAmount)
+        await supabase
           .from('fantasy_teams')
-          .select('id, name, budget')
+          .update({ budget: nextBudget })
           .eq('id', winnerTeamId)
-          .single()
 
-        if (winnerTeam) {
-          const nextBudget = Math.max(0, Number(winnerTeam.budget || 0) - winningAmount)
-          await supabase
+        // For player sales, add seller budget increase
+        if (isPlayerSale && auction.seller_team_id && auction.seller_team_id !== winnerTeamId) {
+          const { data: sellerTeam } = await supabase
             .from('fantasy_teams')
-            .update({ budget: nextBudget })
-            .eq('id', winnerTeamId)
+            .select('id, budget')
+            .eq('id', auction.seller_team_id)
+            .single()
 
-          // For player sales, add seller budget increase
-          if (isPlayerSale && auction.seller_team_id && auction.seller_team_id !== winnerTeamId) {
-            const { data: sellerTeam } = await supabase
+          if (sellerTeam) {
+            const sellerNewBudget = Number(sellerTeam.budget || 0) + winningAmount
+            await supabase
               .from('fantasy_teams')
-              .select('id, budget')
+              .update({ budget: sellerNewBudget })
               .eq('id', auction.seller_team_id)
-              .single()
-
-            if (sellerTeam) {
-              const sellerNewBudget = Number(sellerTeam.budget || 0) + winningAmount
-              await supabase
-                .from('fantasy_teams')
-                .update({ budget: sellerNewBudget })
-                .eq('id', auction.seller_team_id)
-            }
           }
+        }
+      }
 
-          // Record in sales history if player sale
-          if (isPlayerSale) {
-            const { error: historyError } = await supabase
-              .from('player_sales_history')
-              .insert({
-                auction_id: null,
-                seller_team_id: auction.seller_team_id || null,
-                buyer_team_id: winnerTeamId,
-                player_id: auction.player_id,
-                league_id: leagueId,
-                sale_price: winningAmount,
-                sale_type: 'auction_win',
-              })
+      // Record every successful auction in sales history.
+      // For market/PC auctions, seller_team_id stays null.
+      const { error: historyError } = await supabase
+        .from('player_sales_history')
+        .insert({
+          auction_id: null,
+          seller_team_id: auction.seller_team_id || null,
+          buyer_team_id: winnerTeamId,
+          player_id: auction.player_id,
+          league_id: leagueId,
+          sale_price: winningAmount,
+          sale_type: 'auction_win',
+        })
 
-            if (historyError) {
-              console.error('Failed to insert player sales history:', historyError)
-            }
-          }
+      if (historyError) {
+        throw new Error(`Failed to insert player sales history: ${historyError.message}`)
+      }
 
-          const loserTeamIds: string[] = Array.from(
-            new Set((bids || []).map((b: any) => b.team_id as string).filter((teamId: string) => teamId !== winnerTeamId))
-          )
+      const playerName = playerNameMap.get(auction.player_id) || 'Spieler'
+      const { error: winnerNewsError } = await supabase.from('league_news').insert([
+        {
+          league_id: leagueId,
+          team_id: winnerTeamId,
+          title: 'Spieler gekauft',
+          message: `Du hast ${playerName} für ${winningAmount.toLocaleString('de-DE')}€ gekauft.`,
+        },
+      ])
 
-          if (loserTeamIds.length > 0) {
-            const playerName = playerNameMap.get(auction.player_id) || 'Spieler'
-            const newsRows = loserTeamIds.map((teamId: string) => ({
-              league_id: leagueId,
-              team_id: teamId,
-              title: 'Gebot abgelehnt',
-              message: `Dein Gebot auf ${playerName} war nicht erfolgreich. ${winnerTeam.name} hat den Spieler erhalten.`,
-            }))
+      if (winnerNewsError) {
+        throw new Error(`Failed to insert winner news entry: ${winnerNewsError.message}`)
+      }
 
-            const { error: newsError } = await supabase.from('league_news').insert(newsRows)
-            if (newsError) {
-              console.error('Failed to insert loser news entries:', newsError)
-            }
-          }
+      const loserTeamIds: string[] = Array.from(
+        new Set((bids || []).map((b: any) => b.team_id as string).filter((teamId: string) => teamId !== winnerTeamId))
+      )
+
+      if (loserTeamIds.length > 0) {
+        const newsRows = loserTeamIds.map((teamId: string) => ({
+          league_id: leagueId,
+          team_id: teamId,
+          title: 'Gebot abgelehnt',
+          message: `Dein Gebot auf ${playerName} war nicht erfolgreich. ${winnerTeam.name} hat den Spieler erhalten.`,
+        }))
+
+        const { error: newsError } = await supabase.from('league_news').insert(newsRows)
+        if (newsError) {
+          throw new Error(`Failed to insert loser news entries: ${newsError.message}`)
         }
       }
     }
@@ -496,16 +511,17 @@ export async function refillTransferMarketForActiveTournament(supabase: AdminCli
 
     const { data: activeAuctions, error: auctionError } = await supabase
       .from('market_auctions')
-      .select('player_id')
+      .select('player_id, seller_team_id')
       .eq('league_id', league.id)
       .gt('end_time', nowIso)
 
     if (auctionError) throw auctionError
 
     const activeAuctionPlayerIds = new Set<string>((activeAuctions || []).map((a: any) => a.player_id as string))
-    const activeCount = activeAuctions?.length || 0
+    const activePcOfferCount = (activeAuctions || []).filter((a: any) => !a.seller_team_id).length
 
-    if (activeCount >= 8) continue
+    // Keep exactly 8 active PC offers, independent of additional manager offers.
+    if (activePcOfferCount >= 8) continue
 
     const { data: leagueTeams, error: teamsError } = await supabase
       .from('fantasy_teams')
@@ -531,7 +547,7 @@ export async function refillTransferMarketForActiveTournament(supabase: AdminCli
       (playerId: string) => !activeAuctionPlayerIds.has(playerId) && !teamPlayerIds.has(playerId)
     )
 
-    const needed = Math.min(8 - activeCount, candidates.length)
+    const needed = Math.min(8 - activePcOfferCount, candidates.length)
     if (needed <= 0) continue
 
     const selectedPlayers = await pickPlayersForLeagueCycle(supabase, league.id, candidates, needed, nowIso)

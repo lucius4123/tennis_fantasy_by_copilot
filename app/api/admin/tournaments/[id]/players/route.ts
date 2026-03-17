@@ -27,7 +27,7 @@ export async function GET(_request: NextRequest, context: { params: Promise<{ id
 
   const { data, error } = await supabase
     .from('tournament_players')
-    .select('id, tournament_id, player_id, appearance_probability, market_value, player:players(id, first_name, last_name, ranking, image_url)')
+    .select('id, tournament_id, player_id, appearance_probability, market_value, is_wildcard, player:players(id, first_name, last_name, ranking, image_url)')
     .eq('tournament_id', id)
 
   if (error) {
@@ -46,9 +46,11 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
   const { id } = await context.params
   const body = await request.json()
   const playerId = body?.player_id as string
-  const appearanceProbability = (body?.appearance_probability as string) || 'Wahrscheinlich'
+  const rawAppearanceProbability = (body?.appearance_probability as string) || 'Wahrscheinlich'
   const marketValue = (body?.market_value as number) || 0
+  const isWildcard = body?.is_wildcard === true
   const validValues = ['Garantiert', 'Sehr Wahrscheinlich', 'Wahrscheinlich', 'Riskant', 'Sehr Riskant', 'Ausgeschlossen']
+  const appearanceProbability = isWildcard ? 'Garantiert' : rawAppearanceProbability
 
   if (!playerId) {
     return NextResponse.json({ error: 'player_id is required' }, { status: 400 })
@@ -70,6 +72,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       player_id: playerId,
       appearance_probability: appearanceProbability,
       market_value: marketValue,
+      is_wildcard: isWildcard,
     })
     .select()
     .single()

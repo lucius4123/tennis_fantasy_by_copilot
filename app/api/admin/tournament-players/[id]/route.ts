@@ -26,6 +26,7 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   const body = await request.json()
   const probability = body?.appearance_probability as string
   const marketValue = body?.market_value as number | undefined
+  const isWildcard = body?.is_wildcard as boolean | undefined
 
   const updateData: any = {}
 
@@ -35,6 +36,20 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       return NextResponse.json({ error: 'Invalid appearance_probability' }, { status: 400 })
     }
     updateData.appearance_probability = probability
+    if (probability !== 'Garantiert') {
+      updateData.is_wildcard = false
+    }
+  }
+
+  if (isWildcard !== undefined) {
+    if (typeof isWildcard !== 'boolean') {
+      return NextResponse.json({ error: 'Invalid is_wildcard. Must be a boolean' }, { status: 400 })
+    }
+
+    updateData.is_wildcard = isWildcard
+    if (isWildcard) {
+      updateData.appearance_probability = 'Garantiert'
+    }
   }
 
   if (marketValue !== undefined) {

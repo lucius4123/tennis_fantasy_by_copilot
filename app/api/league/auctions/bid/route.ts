@@ -82,34 +82,6 @@ export async function POST(request: Request) {
       }
     }
 
-    const { data: myExistingBid } = await supabase
-      .from('market_bids')
-      .select('bid_amount')
-      .eq('auction_id', auctionId)
-      .eq('team_id', team.id)
-      .maybeSingle()
-
-    if (myExistingBid && bidAmount <= Number(myExistingBid.bid_amount || 0)) {
-      return NextResponse.json({ error: 'New bid must be higher than your previous bid' }, { status: 400 })
-    }
-
-    const { data: topBidRows, error: topBidError } = await supabase
-      .from('market_bids')
-      .select('team_id, bid_amount')
-      .eq('auction_id', auctionId)
-      .order('bid_amount', { ascending: false })
-      .order('created_at', { ascending: true })
-      .limit(1)
-
-    if (topBidError) {
-      return NextResponse.json({ error: 'Failed to evaluate current top bid' }, { status: 500 })
-    }
-
-    const currentTopBid = Number(topBidRows?.[0]?.bid_amount || 0)
-    if (bidAmount <= currentTopBid) {
-      return NextResponse.json({ error: 'Bid too low' }, { status: 400 })
-    }
-
     // Sum all bids the team already has on other still-active auctions
     const { data: activeOtherAuctions } = await supabase
       .from('market_auctions')
@@ -153,9 +125,26 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Failed to place bid' }, { status: 500 })
     }
 
+    const { data: topBidRows, error: topBidError } = await supabase
+      .from('market_bids')
+      .select('team_id, bid_amount')
+      .eq('auction_id', auctionId)
+      .order('bid_amount', { ascending: false })
+      .order('created_at', { ascending: true })
+      .limit(1)
+
+    if (topBidError) {
+      return NextResponse.json({ error: 'Failed to evaluate current top bid' }, { status: 500 })
+    }
+
+    const newTopBid = topBidRows?.[0] ?? null
+
     await supabase
       .from('market_auctions')
-      .update({ highest_bid: bidAmount, highest_bidder_id: team.id })
+      .update({
+        highest_bid: newTopBid ? Number(newTopBid.bid_amount) : 0,
+        highest_bidder_id: newTopBid ? newTopBid.team_id : null,
+      })
       .eq('id', auctionId)
 
     return NextResponse.json({ success: true, myBid: bidAmount })
