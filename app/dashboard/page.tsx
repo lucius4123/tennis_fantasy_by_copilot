@@ -3,7 +3,6 @@ import { isAdminUser } from '@/lib/auth'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import { LogOut, Trophy } from 'lucide-react'
-import ThemeToggle from './theme-toggle'
 
 type ScoringRule = {
   id: string
@@ -35,8 +34,8 @@ export default async function DashboardPage() {
     .order('stat_name', { ascending: true })
 
   return (
-    <div className="min-h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-      <nav className="bg-white border-b border-zinc-200 dark:bg-zinc-900 dark:border-zinc-800">
+    <div className="min-h-screen bg-zinc-50 text-zinc-900">
+      <nav className="bg-white border-b border-zinc-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16">
             <div className="flex items-center">
@@ -44,9 +43,8 @@ export default async function DashboardPage() {
               <span className="font-semibold text-xl tracking-tight">Tennis Fantasy</span>
             </div>
             <div className="flex items-center space-x-4">
-              <ThemeToggle />
               <form action="/auth/signout" method="post">
-                <button type="submit" className="text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 flex items-center text-sm font-medium">
+                <button type="submit" className="flex items-center text-sm font-medium text-zinc-500 hover:text-zinc-900">
                   <LogOut className="h-4 w-4 mr-1" />
                   Sign out
                 </button>
@@ -75,9 +73,9 @@ export default async function DashboardPage() {
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* Leagues Section */}
-          <div className="bg-white p-6 rounded-2xl shadow-sm border border-zinc-100 dark:bg-zinc-900 dark:border-zinc-800">
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-zinc-100">
             <div className="flex items-center mb-4">
-              <Trophy className="h-5 w-5 text-zinc-400 dark:text-zinc-500 mr-2" />
+              <Trophy className="h-5 w-5 text-zinc-400 mr-2" />
               <h2 className="text-lg font-semibold">My Leagues</h2>
             </div>
             {userLeagues && userLeagues.length > 0 ? (
@@ -86,7 +84,7 @@ export default async function DashboardPage() {
                   <li key={ul.league_id}>
                     <Link
                       href={`/dashboard/league/${ul.league_id}`}
-                      className="p-3 bg-zinc-50 rounded-xl border border-zinc-100 dark:bg-zinc-800 dark:border-zinc-700 flex justify-between items-center hover:border-emerald-300 dark:hover:border-emerald-600 transition-colors"
+                      className="flex items-center justify-between rounded-xl border border-zinc-100 bg-zinc-50 p-3 transition-colors hover:border-emerald-300"
                     >
                       <span className="font-medium">{ul.leagues?.name}</span>
                     </Link>
@@ -94,25 +92,25 @@ export default async function DashboardPage() {
                 ))}
               </ul>
             ) : (
-              <div className="text-center py-6 bg-zinc-50 dark:bg-zinc-800 rounded-xl border border-zinc-100 dark:border-zinc-700 border-dashed">
-                <p className="text-zinc-500 dark:text-zinc-400 text-sm mb-3">You haven&apos;t joined any leagues yet.</p>
+              <div className="rounded-xl border border-zinc-100 border-dashed bg-zinc-50 py-6 text-center">
+                <p className="mb-3 text-sm text-zinc-500">You haven&apos;t joined any leagues yet.</p>
                 <button className="text-emerald-600 text-sm font-medium hover:underline">Create or Join League</button>
               </div>
             )}
           </div>
 
           {/* Global Scoring Rules Section */}
-          <div className="bg-white p-6 rounded-2xl shadow-sm border border-zinc-100 dark:bg-zinc-900 dark:border-zinc-800">
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-zinc-100">
             <div className="flex items-center mb-4">
-              <Trophy className="h-5 w-5 text-zinc-400 dark:text-zinc-500 mr-2" />
+              <Trophy className="h-5 w-5 text-zinc-400 mr-2" />
               <h2 className="text-lg font-semibold">Globale Punkteverteilung</h2>
             </div>
             {scoringRules && scoringRules.length > 0 ? (
               <ul className="space-y-3">
                 {(scoringRules as ScoringRule[]).map((rule) => (
-                  <li key={rule.id} className="p-3 bg-zinc-50 dark:bg-zinc-800 rounded-xl border border-zinc-100 dark:border-zinc-700">
+                  <li key={rule.id} className="rounded-xl border border-zinc-100 bg-zinc-50 p-3">
                     <div className="flex justify-between items-center gap-3">
-                      <span className="font-medium text-zinc-900 dark:text-zinc-100">{rule.description || rule.stat_name}</span>
+                      <span className="font-medium text-zinc-900">{rule.description || rule.stat_name}</span>
                       <span
                         className={`text-sm font-semibold whitespace-nowrap ${
                           rule.points_per_unit < 0 ? 'text-red-600' : 'text-emerald-700'
@@ -122,13 +120,13 @@ export default async function DashboardPage() {
                         {rule.points_per_unit}
                       </span>
                     </div>
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{rule.stat_name}</p>
+                    <p className="mt-1 text-xs text-zinc-500">{rule.stat_name}</p>
                   </li>
                 ))}
               </ul>
             ) : (
-              <div className="text-center py-6 bg-zinc-50 dark:bg-zinc-800 rounded-xl border border-zinc-100 dark:border-zinc-700 border-dashed">
-                <p className="text-zinc-500 dark:text-zinc-400 text-sm">Keine Punkteverteilung gefunden.</p>
+              <div className="rounded-xl border border-zinc-100 border-dashed bg-zinc-50 py-6 text-center">
+                <p className="text-sm text-zinc-500">Keine Punkteverteilung gefunden.</p>
               </div>
             )}
           </div>
@@ -136,7 +134,7 @@ export default async function DashboardPage() {
       </main>
 
       <footer className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-8">
-        <div className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+        <div className="text-xs text-zinc-500 leading-relaxed">
           <p>Tennis Fantasy Manager</p>
           <p>Version 1.0.0</p>
           <p>Early-Access</p>

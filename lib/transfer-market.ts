@@ -464,6 +464,7 @@ async function resolveExpiredAuctionsForLeague(supabase: AdminClient, leagueId: 
 
 export async function refillTransferMarketForActiveTournament(supabase: AdminClient) {
   const nowIso = new Date().toISOString()
+  const targetActivePcOffers = 16
 
   const { data: activeTournaments, error: tournamentError } = await supabase
     .from('tournaments')
@@ -520,8 +521,8 @@ export async function refillTransferMarketForActiveTournament(supabase: AdminCli
     const activeAuctionPlayerIds = new Set<string>((activeAuctions || []).map((a: any) => a.player_id as string))
     const activePcOfferCount = (activeAuctions || []).filter((a: any) => !a.seller_team_id).length
 
-    // Keep exactly 8 active PC offers, independent of additional manager offers.
-    if (activePcOfferCount >= 8) continue
+    // Keep exactly 16 active PC offers, independent of additional manager offers.
+    if (activePcOfferCount >= targetActivePcOffers) continue
 
     const { data: leagueTeams, error: teamsError } = await supabase
       .from('fantasy_teams')
@@ -547,7 +548,7 @@ export async function refillTransferMarketForActiveTournament(supabase: AdminCli
       (playerId: string) => !activeAuctionPlayerIds.has(playerId) && !teamPlayerIds.has(playerId)
     )
 
-    const needed = Math.min(8 - activePcOfferCount, candidates.length)
+    const needed = Math.min(targetActivePcOffers - activePcOfferCount, candidates.length)
     if (needed <= 0) continue
 
     const selectedPlayers = await pickPlayersForLeagueCycle(supabase, league.id, candidates, needed, nowIso)

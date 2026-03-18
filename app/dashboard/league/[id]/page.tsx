@@ -1348,17 +1348,17 @@ const loadAuctions = async () => {
   ];
 
   return (
-    <div className="dark-surface-scope min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 p-6 max-w-4xl mx-auto">
+    <div className="min-h-screen bg-zinc-50 text-zinc-900 p-6 max-w-4xl mx-auto">
       <h1 className="text-3xl font-bold mb-6">Liga</h1>
 
       {/* tabs */}
-      <nav className="mb-8 border-b border-zinc-200 dark:border-zinc-800 overflow-x-auto">
+      <nav className="mb-8 border-b border-zinc-200 overflow-x-auto">
         <div className="grid grid-flow-col auto-cols-fr gap-2 min-w-[640px]">
           {['leaderboard','auctions','myteam','tournaments','news'].map(tab => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`w-full pb-2 text-sm font-medium transition-colors whitespace-nowrap ${activeTab === tab ? 'border-b-2 border-emerald-600 text-emerald-600' : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100'}`}
+              className={`w-full pb-2 text-sm font-medium transition-colors whitespace-nowrap ${activeTab === tab ? 'border-b-2 border-emerald-600 text-emerald-600' : 'text-zinc-600 hover:text-zinc-900'}`}
             >
               {tab === 'leaderboard' ? 'Rangliste' : tab === 'auctions' ? 'Transfermarkt' : tab === 'myteam' ? 'Mein Team' : tab === 'tournaments' ? 'Turniere & Aufstellung' : 'News'}
             </button>
