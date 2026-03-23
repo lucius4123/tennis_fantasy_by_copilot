@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient as createServerAuthClient } from '@/utils/supabase/server'
 import { createClient as createSupabaseClient } from '@supabase/supabase-js'
+import { findTournamentTypeOption } from '@/lib/tournament-types'
 
 function getAdminClient() {
   return createSupabaseClient(
@@ -46,6 +47,9 @@ export async function POST(request: NextRequest) {
   const startDate = body?.startDate as string
   const startBudget = body?.start_budget as number | undefined
   const starterTeamTargetValue = body?.starter_team_target_value as number | undefined
+  const countryCodeRaw = body?.country_code as string | undefined
+  const previousWinnerPlayerIdRaw = body?.previous_winner_player_id as string | null | undefined
+  const tournamentTypeRaw = body?.tournament_type as string | null | undefined
 
   if (!name || !startDate) {
     return NextResponse.json({ error: 'name and startDate are required' }, { status: 400 })
@@ -59,6 +63,21 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'starter_team_target_value must be a non-negative number' }, { status: 400 })
   }
 
+  const countryCode = countryCodeRaw?.trim().toUpperCase()
+  if (countryCode && !/^[A-Z]{2}$/.test(countryCode)) {
+    return NextResponse.json({ error: 'country_code must be a 2-letter ISO code (e.g. DE)' }, { status: 400 })
+  }
+
+  const previousWinnerPlayerId = typeof previousWinnerPlayerIdRaw === 'string'
+    ? previousWinnerPlayerIdRaw.trim() || null
+    : null
+
+  const tournamentType = typeof tournamentTypeRaw === 'string' ? tournamentTypeRaw.trim() : ''
+  const tournamentTypeOption = tournamentType ? findTournamentTypeOption(tournamentType) : null
+  if (tournamentType && !tournamentTypeOption) {
+    return NextResponse.json({ error: 'tournament_type is invalid' }, { status: 400 })
+  }
+
   const supabase = getAdminClient()
   const { data, error } = await supabase
     .from('tournaments')
@@ -69,6 +88,10 @@ export async function POST(request: NextRequest) {
       status: 'upcoming',
       start_budget: startBudget ?? 1000000,
       starter_team_target_value: starterTeamTargetValue ?? 0,
+      country_code: countryCode || null,
+      previous_winner_player_id: previousWinnerPlayerId,
+      tournament_category: tournamentTypeOption?.category ?? null,
+      singles_player_count: tournamentTypeOption?.singlesPlayerCount ?? null,
     })
     .select()
     .single()

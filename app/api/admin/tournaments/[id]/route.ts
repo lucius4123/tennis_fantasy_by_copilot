@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient as createServerAuthClient } from '@/utils/supabase/server'
 import { createAdminClient, refillTransferMarketForActiveTournament, assignInitialTeamLineups, resetAllTeamBudgets } from '@/lib/transfer-market'
+import { findTournamentTypeOption } from '@/lib/tournament-types'
 
 function getAdminClient() {
   return createAdminClient()
@@ -25,6 +26,9 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   const status = body?.status as string | undefined
   const startBudget = body?.start_budget as number | undefined
   const starterTeamTargetValue = body?.starter_team_target_value as number | undefined
+  const countryCodeRaw = body?.country_code as string | null | undefined
+  const previousWinnerPlayerIdRaw = body?.previous_winner_player_id as string | null | undefined
+  const tournamentTypeRaw = body?.tournament_type as string | null | undefined
 
   const updateData: any = {}
   
@@ -55,6 +59,33 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       return NextResponse.json({ error: 'starter_team_target_value must be a non-negative number' }, { status: 400 })
     }
     updateData.starter_team_target_value = starterTeamTargetValue
+  }
+
+  if (countryCodeRaw !== undefined) {
+    const countryCode = (countryCodeRaw || '').trim().toUpperCase()
+    if (countryCode && !/^[A-Z]{2}$/.test(countryCode)) {
+      return NextResponse.json({ error: 'country_code must be a 2-letter ISO code (e.g. DE)' }, { status: 400 })
+    }
+    updateData.country_code = countryCode || null
+  }
+
+  if (previousWinnerPlayerIdRaw !== undefined) {
+    const previousWinnerPlayerId = typeof previousWinnerPlayerIdRaw === 'string'
+      ? previousWinnerPlayerIdRaw.trim() || null
+      : null
+    updateData.previous_winner_player_id = previousWinnerPlayerId
+  }
+
+  if (tournamentTypeRaw !== undefined) {
+    const tournamentType = typeof tournamentTypeRaw === 'string' ? tournamentTypeRaw.trim() : ''
+    const tournamentTypeOption = tournamentType ? findTournamentTypeOption(tournamentType) : null
+
+    if (tournamentType && !tournamentTypeOption) {
+      return NextResponse.json({ error: 'tournament_type is invalid' }, { status: 400 })
+    }
+
+    updateData.tournament_category = tournamentTypeOption?.category ?? null
+    updateData.singles_player_count = tournamentTypeOption?.singlesPlayerCount ?? null
   }
 
   if (Object.keys(updateData).length === 0) {

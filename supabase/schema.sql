@@ -203,11 +203,23 @@ CREATE TABLE tournaments (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT NOT NULL,
     start_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    country_code TEXT,
+    previous_winner_player_id UUID REFERENCES players(id) ON DELETE SET NULL,
+    tournament_category TEXT CHECK (tournament_category IN ('grand_slam', 'masters_1000', 'atp_500', 'atp_250')),
+    singles_player_count INT CHECK (singles_player_count IN (128, 96, 56, 48, 32, 28)),
     status TEXT DEFAULT 'upcoming' CHECK (status IN ('upcoming', 'on-going', 'completed')),
     is_active BOOLEAN DEFAULT false,
     start_budget INT DEFAULT 1000000,
     starter_team_target_value INT DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+ALTER TABLE tournaments ADD CONSTRAINT tournaments_category_player_count_check CHECK (
+    (tournament_category IS NULL AND singles_player_count IS NULL)
+    OR (tournament_category = 'grand_slam' AND singles_player_count = 128)
+    OR (tournament_category = 'masters_1000' AND singles_player_count IN (96, 56))
+    OR (tournament_category = 'atp_500' AND singles_player_count IN (48, 32))
+    OR (tournament_category = 'atp_250' AND singles_player_count IN (32, 28))
 );
 
 -- Table: tournament_players (Many-to-Many relationship between tournaments and players)

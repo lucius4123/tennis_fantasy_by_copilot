@@ -184,6 +184,7 @@ export default function LeaguePage() {
     const points = playerTournamentPoints.get(player.id) || 0;
     return isReserveSlot(slotIndex) ? Math.max(0, points) : points;
   };
+  const getPointsTextClass = (points: number) => (points < 0 ? 'text-red-600' : 'text-emerald-600');
 
   useEffect(() => {
     const getUser = async () => {
@@ -1408,7 +1409,9 @@ const loadAuctions = async () => {
                         />
                       </label>
                     )}
-                    <span className="text-zinc-500">{team.total_points_scored} Punkte</span>
+                    <span className={`font-medium ${team.total_points_scored < 0 ? 'text-red-600' : 'text-zinc-500'}`}>
+                      {team.total_points_scored} Punkte
+                    </span>
                   </div>
                 </button>
               </li>
@@ -1763,6 +1766,8 @@ const loadAuctions = async () => {
                     const player = lineupSlots[slotIndex];
                     const roundState = player ? playerRoundStates.get(player.id) : undefined;
                     const roundLabel = roundState?.label || 'R1/R2';
+                    const isOut = roundLabel === 'OUT';
+                    const displayedPoints = player ? getDisplayedLineupPoints(player, slotIndex) : 0;
                     const highlightActive = Boolean(
                       player
                       && activeTournament?.status === 'on-going'
@@ -1799,10 +1804,10 @@ const loadAuctions = async () => {
                               <img
                                 src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                                 alt={`${player.first_name} ${player.last_name}`}
-                                className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-zinc-200'}`}
+                                className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-zinc-200'} ${isOut ? 'opacity-60' : ''}`}
                               />
                               <p className="text-xs font-semibold mt-1">{formatLineupPlayerName(player)}</p>
-                              <p className="text-xs text-emerald-600 font-bold">{getDisplayedLineupPoints(player, slotIndex)} Pkt</p>
+                              <p className={`text-xs font-bold ${getPointsTextClass(displayedPoints)}`}>{displayedPoints} Pkt</p>
                               <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-sky-700'}`}>{roundLabel}</p>
                             </div>
                           ) : (
@@ -1833,6 +1838,8 @@ const loadAuctions = async () => {
                     const slotIndex = RESERVE_SLOT_START_INDEX + reserveIndex;
                     const roundState = player ? playerRoundStates.get(player.id) : undefined;
                     const roundLabel = roundState?.label || 'R1/R2';
+                    const isOut = roundLabel === 'OUT';
+                    const displayedPoints = player ? getDisplayedLineupPoints(player, slotIndex) : 0;
                     const highlightActive = Boolean(
                       player
                       && activeTournament?.status === 'on-going'
@@ -1870,10 +1877,10 @@ const loadAuctions = async () => {
                               <img
                                 src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                                 alt={`${player.first_name} ${player.last_name}`}
-                                className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-pink-200'}`}
+                                className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-pink-200'} ${isOut ? 'opacity-60' : ''}`}
                               />
                               <p className="text-xs font-semibold mt-1 text-pink-950">{formatLineupPlayerName(player)}</p>
-                              <p className="text-xs text-emerald-600 font-bold">{getDisplayedLineupPoints(player, slotIndex)} Pkt</p>
+                              <p className={`text-xs font-bold ${getPointsTextClass(displayedPoints)}`}>{displayedPoints} Pkt</p>
                               <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-pink-700'}`}>{roundLabel}</p>
                             </div>
                           ) : (
@@ -2101,7 +2108,10 @@ const loadAuctions = async () => {
                       <div><span className="text-zinc-500">Break kassiert:</span> {match.breaks_conceded || 0}</div>
                       <div><span className="text-zinc-500">Winners:</span> {match.winners}</div>
                       <div><span className="text-zinc-500">Unforced Errors:</span> {match.unforced_errors}</div>
-                      <div><span className="text-zinc-500">Fantasy Punkte:</span> <span className="font-semibold text-emerald-600">{match.fantasy_points}</span></div>
+                      <div>
+                        <span className="text-zinc-500">Fantasy Punkte:</span>{' '}
+                        <span className={`font-semibold ${match.fantasy_points < 0 ? 'text-red-600' : 'text-emerald-600'}`}>{match.fantasy_points}</span>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -2164,6 +2174,8 @@ const loadAuctions = async () => {
                             const player = teamInspection.lineupSlots[slotIndex] || null;
                             const roundState = player ? playerRoundStates.get(player.id) : undefined;
                             const roundLabel = roundState?.label || 'R1/R2';
+                            const isOut = roundLabel === 'OUT';
+                            const displayedPoints = player ? getDisplayedLineupPoints(player, slotIndex) : 0;
                             const highlightActive = Boolean(
                               player
                               && activeTournament?.status === 'on-going'
@@ -2185,11 +2197,11 @@ const loadAuctions = async () => {
                                       <img
                                         src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                                         alt={`${player.first_name} ${player.last_name}`}
-                                        className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-zinc-200'}`}
+                                        className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-zinc-200'} ${isOut ? 'opacity-60' : ''}`}
                                       />
                                       <p className="text-xs font-semibold mt-1">{formatLineupPlayerName(player)}</p>
                                       <p className="text-xs text-zinc-500">#{player.ranking}</p>
-                                      <p className="text-xs text-emerald-600 font-bold">{getDisplayedLineupPoints(player, slotIndex)} Pkt</p>
+                                      <p className={`text-xs font-bold ${getPointsTextClass(displayedPoints)}`}>{displayedPoints} Pkt</p>
                                       <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-sky-700'}`}>{roundLabel}</p>
                                     </button>
                                   ) : (
@@ -2213,6 +2225,8 @@ const loadAuctions = async () => {
                             const slotIndex = RESERVE_SLOT_START_INDEX + reserveIndex;
                             const roundState = player ? playerRoundStates.get(player.id) : undefined;
                             const roundLabel = roundState?.label || 'R1/R2';
+                            const isOut = roundLabel === 'OUT';
+                            const displayedPoints = player ? getDisplayedLineupPoints(player, slotIndex) : 0;
                             const highlightActive = Boolean(
                               player
                               && activeTournament?.status === 'on-going'
@@ -2230,11 +2244,11 @@ const loadAuctions = async () => {
                                     <img
                                       src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                                       alt={`${player.first_name} ${player.last_name}`}
-                                      className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-pink-200'}`}
+                                      className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-pink-200'} ${isOut ? 'opacity-60' : ''}`}
                                     />
                                     <p className="text-xs font-semibold mt-1 text-pink-950">{formatLineupPlayerName(player)}</p>
                                     <p className="text-xs text-zinc-500">#{player.ranking}</p>
-                                    <p className="text-xs text-emerald-600 font-bold">{getDisplayedLineupPoints(player, slotIndex)} Pkt</p>
+                                    <p className={`text-xs font-bold ${getPointsTextClass(displayedPoints)}`}>{displayedPoints} Pkt</p>
                                     <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-pink-700'}`}>{roundLabel}</p>
                                   </button>
                                 ) : (
@@ -2298,7 +2312,7 @@ const loadAuctions = async () => {
                                 ) : (
                                   <span className={`text-lg ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
                                 )}
-                                <span className="text-sm font-semibold text-emerald-600">
+                                <span className={`text-sm font-semibold ${getPointsTextClass(playerTournamentPoints.get(player.id) || 0)}`}>
                                   {playerTournamentPoints.get(player.id) || 0} Pkt
                                 </span>
                               </div>

@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { ArrowLeft, Plus, Trash2, Calendar, Users, Save, RotateCcw, Target, Trophy, Pencil } from 'lucide-react'
 import { useState, useEffect } from 'react'
+import { findTournamentTypeOption, getTournamentTypeValue, TOURNAMENT_TYPE_OPTIONS } from '@/lib/tournament-types'
 
 interface Tournament {
   id: string
@@ -12,6 +13,11 @@ interface Tournament {
   status: 'upcoming' | 'on-going' | 'completed'
   start_budget: number
   starter_team_target_value: number
+  country_code: string | null
+  previous_winner_player_id: string | null
+  tournament_category: string | null
+  singles_player_count: number | null
+  tournament_type: string | null
 }
 
 interface SupabaseErrorLike {
@@ -122,6 +128,9 @@ export default function AdminPage() {
   const [newTournamentDate, setNewTournamentDate] = useState('')
   const [newTournamentStartBudget, setNewTournamentStartBudget] = useState(1000000)
   const [newTournamentStarterTeamTargetValue, setNewTournamentStarterTeamTargetValue] = useState(0)
+  const [newTournamentCountryCode, setNewTournamentCountryCode] = useState('')
+  const [newTournamentPreviousWinnerPlayerId, setNewTournamentPreviousWinnerPlayerId] = useState('')
+  const [newTournamentType, setNewTournamentType] = useState('')
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -170,6 +179,11 @@ export default function AdminPage() {
         is_active: Boolean(t.is_active),
         start_budget: Number(t.start_budget ?? 1000000),
         starter_team_target_value: Number(t.starter_team_target_value ?? 0),
+        country_code: t.country_code ? String(t.country_code).toUpperCase() : null,
+        previous_winner_player_id: t.previous_winner_player_id || null,
+        tournament_category: t.tournament_category || null,
+        singles_player_count: t.singles_player_count != null ? Number(t.singles_player_count) : null,
+        tournament_type: getTournamentTypeValue(t.tournament_category || null, t.singles_player_count ?? null),
       }))
       setTournaments(normalized)
       setOriginalTournaments(normalized)
@@ -220,6 +234,12 @@ export default function AdminPage() {
       return
     }
 
+    const normalizedCountryCode = newTournamentCountryCode.trim().toUpperCase()
+    if (normalizedCountryCode && !/^[A-Z]{2}$/.test(normalizedCountryCode)) {
+      alert('Land muss als ISO-2 Code angegeben werden (z. B. DE)')
+      return
+    }
+
     const tempTournament: Tournament = {
       id: `temp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       name: newTournamentName,
@@ -228,6 +248,11 @@ export default function AdminPage() {
       status: 'upcoming',
       start_budget: newTournamentStartBudget,
       starter_team_target_value: newTournamentStarterTeamTargetValue,
+      country_code: normalizedCountryCode || null,
+      previous_winner_player_id: newTournamentPreviousWinnerPlayerId || null,
+      tournament_category: findTournamentTypeOption(newTournamentType)?.category ?? null,
+      singles_player_count: findTournamentTypeOption(newTournamentType)?.singlesPlayerCount ?? null,
+      tournament_type: newTournamentType || null,
     }
 
     setTournaments((prev) => [...prev, tempTournament])
@@ -235,6 +260,9 @@ export default function AdminPage() {
     setNewTournamentDate('')
     setNewTournamentStartBudget(1000000)
     setNewTournamentStarterTeamTargetValue(0)
+    setNewTournamentCountryCode('')
+    setNewTournamentPreviousWinnerPlayerId('')
+    setNewTournamentType('')
     setHasUnsavedChanges(true)
   }
 
@@ -381,6 +409,9 @@ export default function AdminPage() {
               startDate: tournament.start_date,
               start_budget: tournament.start_budget,
               starter_team_target_value: tournament.starter_team_target_value,
+              country_code: tournament.country_code,
+              previous_winner_player_id: tournament.previous_winner_player_id,
+              tournament_type: tournament.tournament_type,
             }),
         })
         const payload = await response.json()
@@ -404,7 +435,10 @@ export default function AdminPage() {
           original.is_active !== t.is_active ||
           original.status !== t.status ||
           original.start_budget !== t.start_budget ||
-          original.starter_team_target_value !== t.starter_team_target_value
+          original.starter_team_target_value !== t.starter_team_target_value ||
+          (original.country_code || null) !== (t.country_code || null) ||
+          (original.previous_winner_player_id || null) !== (t.previous_winner_player_id || null) ||
+          (original.tournament_type || null) !== (t.tournament_type || null)
         )
       })
 
@@ -423,6 +457,15 @@ export default function AdminPage() {
         }
         if (original && original.starter_team_target_value !== tournament.starter_team_target_value) {
           updatePayload.starter_team_target_value = tournament.starter_team_target_value
+        }
+        if (original && (original.country_code || null) !== (tournament.country_code || null)) {
+          updatePayload.country_code = tournament.country_code || null
+        }
+        if (original && (original.previous_winner_player_id || null) !== (tournament.previous_winner_player_id || null)) {
+          updatePayload.previous_winner_player_id = tournament.previous_winner_player_id || null
+        }
+        if (original && (original.tournament_type || null) !== (tournament.tournament_type || null)) {
+          updatePayload.tournament_type = tournament.tournament_type || null
         }
 
         const response = await fetch(`/api/admin/tournaments/${tournament.id}`, {
@@ -813,6 +856,38 @@ export default function AdminPage() {
                   className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
                   placeholder="Zielwert Starterteam"
                 />
+                <input
+                  type="text"
+                  maxLength={2}
+                  value={newTournamentCountryCode}
+                  onChange={(e) => setNewTournamentCountryCode(e.target.value.replace(/[^a-zA-Z]/g, '').toUpperCase())}
+                  className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                  placeholder="Land (ISO-2, z.B. DE)"
+                />
+                <select
+                  value={newTournamentPreviousWinnerPlayerId}
+                  onChange={(e) => setNewTournamentPreviousWinnerPlayerId(e.target.value)}
+                  className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                >
+                  <option value="">Kein Vorjahressieger</option>
+                  {players.map((player) => (
+                    <option key={player.id} value={player.id}>
+                      {player.first_name} {player.last_name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={newTournamentType}
+                  onChange={(e) => setNewTournamentType(e.target.value)}
+                  className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                >
+                  <option value="">Turnierart wählen</option>
+                  {TOURNAMENT_TYPE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
                 <button
                   onClick={createTournament}
                   className="w-full bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg font-medium flex items-center justify-center gap-2 transition-colors"
@@ -867,6 +942,11 @@ export default function AdminPage() {
                         <p className="text-xs text-zinc-500 mt-1">
                           Startkapital: {tournament.start_budget.toLocaleString('de-DE')}€ · Starterteam-Ziel: {tournament.starter_team_target_value.toLocaleString('de-DE')}€
                         </p>
+                        {tournament.tournament_type ? (
+                          <p className="text-xs text-zinc-500 mt-1">
+                            Typ: {findTournamentTypeOption(tournament.tournament_type)?.label || tournament.tournament_type}
+                          </p>
+                        ) : null}
                       </div>
                       <div className="flex items-center gap-2">
                         <select
@@ -940,6 +1020,55 @@ export default function AdminPage() {
                         onChange={(e) => updateTournamentSettings(currentSelectedTournament.id, { starter_team_target_value: e.target.value === '' ? 0 : parseInt(e.target.value) })}
                         className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
                       />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-zinc-700 mb-1">Land (ISO-2)</label>
+                      <input
+                        type="text"
+                        maxLength={2}
+                        value={currentSelectedTournament.country_code || ''}
+                        onChange={(e) => updateTournamentSettings(currentSelectedTournament.id, { country_code: e.target.value.replace(/[^a-zA-Z]/g, '').toUpperCase() || null })}
+                        className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                        placeholder="DE"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="block text-sm font-medium text-zinc-700 mb-1">Turnierart</label>
+                      <select
+                        value={currentSelectedTournament.tournament_type || ''}
+                        onChange={(e) => {
+                          const selectedType = e.target.value
+                          const option = findTournamentTypeOption(selectedType)
+                          updateTournamentSettings(currentSelectedTournament.id, {
+                            tournament_type: selectedType || null,
+                            tournament_category: option?.category ?? null,
+                            singles_player_count: option?.singlesPlayerCount ?? null,
+                          })
+                        }}
+                        className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                      >
+                        <option value="">Keine Turnierart ausgewählt</option>
+                        {TOURNAMENT_TYPE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="block text-sm font-medium text-zinc-700 mb-1">Vorjahressieger</label>
+                      <select
+                        value={currentSelectedTournament.previous_winner_player_id || ''}
+                        onChange={(e) => updateTournamentSettings(currentSelectedTournament.id, { previous_winner_player_id: e.target.value || null })}
+                        className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                      >
+                        <option value="">Kein Vorjahressieger</option>
+                        {players.map((player) => (
+                          <option key={player.id} value={player.id}>
+                            {player.first_name} {player.last_name}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                   </div>
                   <p className="text-xs text-zinc-500 mt-3">
