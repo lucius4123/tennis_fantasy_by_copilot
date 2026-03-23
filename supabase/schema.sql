@@ -229,8 +229,15 @@ CREATE TABLE tournament_players (
     player_id UUID REFERENCES players(id) ON DELETE CASCADE,
     appearance_probability TEXT NOT NULL CHECK (appearance_probability IN ('Garantiert', 'Sehr Wahrscheinlich', 'Wahrscheinlich', 'Riskant', 'Sehr Riskant', 'Ausgeschlossen')),
     is_wildcard BOOLEAN NOT NULL DEFAULT false,
+        seeding_status TEXT NOT NULL DEFAULT 'Main-Draw' CHECK (seeding_status IN ('Top-Seed', 'Main-Draw', 'Gesetzt', 'Qualifikation - R1', 'Qualifikation - R2')),
+        tournament_seed_position INT,
+        qualification_seed_position INT,
     market_value DECIMAL(10,2) DEFAULT 0,
     CHECK (NOT is_wildcard OR appearance_probability = 'Garantiert'),
+        CHECK (
+            (tournament_seed_position IS NULL OR tournament_seed_position > 0)
+            AND (qualification_seed_position IS NULL OR qualification_seed_position > 0)
+        ),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     UNIQUE(tournament_id, player_id)
 );

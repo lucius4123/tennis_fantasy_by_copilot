@@ -39,6 +39,9 @@ interface TournamentPlayer {
   player_id: string
   appearance_probability: string
   is_wildcard?: boolean
+  seeding_status?: 'Top-Seed' | 'Main-Draw' | 'Gesetzt' | 'Qualifikation - R1' | 'Qualifikation - R2'
+  tournament_seed_position?: number | null
+  qualification_seed_position?: number | null
   market_value?: number
   player?: Player
 }
@@ -81,6 +84,14 @@ const probabilityOptions = [
   'Sehr Riskant',
   'Ausgeschlossen',
 ]
+
+const seedingStatusOptions = [
+  'Top-Seed',
+  'Main-Draw',
+  'Gesetzt',
+  'Qualifikation - R1',
+  'Qualifikation - R2',
+] as const
 
 const probabilityColors: Record<string, string> = {
   Garantiert: 'bg-green-100 text-green-800 border-green-300',
@@ -131,6 +142,7 @@ export default function AdminPage() {
   const [newTournamentCountryCode, setNewTournamentCountryCode] = useState('')
   const [newTournamentPreviousWinnerPlayerId, setNewTournamentPreviousWinnerPlayerId] = useState('')
   const [newTournamentType, setNewTournamentType] = useState('')
+  const [playerSearchQuery, setPlayerSearchQuery] = useState('')
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -217,6 +229,9 @@ export default function AdminPage() {
     const normalized = (payload.tournamentPlayers || []).map((tp: TournamentPlayer) => ({
       ...tp,
       is_wildcard: Boolean(tp.is_wildcard),
+      seeding_status: tp.seeding_status || 'Main-Draw',
+      tournament_seed_position: tp.tournament_seed_position ?? null,
+      qualification_seed_position: tp.qualification_seed_position ?? null,
     }))
     setTournamentPlayers(normalized)
     setOriginalTournamentPlayers(normalized)
@@ -330,8 +345,11 @@ export default function AdminPage() {
         id: tempId,
         tournament_id: selectedTournament.id,
         player_id: playerId,
-        appearance_probability: 'Wahrscheinlich',
+        appearance_probability: 'Garantiert',
         is_wildcard: false,
+        seeding_status: 'Main-Draw',
+        tournament_seed_position: null,
+        qualification_seed_position: null,
         market_value: 0,
         player: selectedPlayer,
       },
@@ -373,6 +391,25 @@ export default function AdminPage() {
   const updatePlayerMarketValue = (tournamentPlayerId: string, marketValue: number) => {
     setTournamentPlayers((prev) =>
       prev.map((tp) => (tp.id === tournamentPlayerId ? { ...tp, market_value: marketValue } : tp))
+    )
+    setHasUnsavedChanges(true)
+  }
+
+  const updatePlayerSeedingStatus = (
+    tournamentPlayerId: string,
+    seedingStatus: 'Top-Seed' | 'Main-Draw' | 'Gesetzt' | 'Qualifikation - R1' | 'Qualifikation - R2'
+  ) => {
+    setTournamentPlayers((prev) =>
+      prev.map((tp) =>
+        tp.id === tournamentPlayerId
+          ? {
+              ...tp,
+              seeding_status: seedingStatus,
+              tournament_seed_position: null,
+              qualification_seed_position: null,
+            }
+          : tp
+      )
     )
     setHasUnsavedChanges(true)
   }
@@ -498,7 +535,8 @@ export default function AdminPage() {
           return original && (
             original.appearance_probability !== tp.appearance_probability ||
             original.market_value !== tp.market_value ||
-            Boolean(original.is_wildcard) !== Boolean(tp.is_wildcard)
+            Boolean(original.is_wildcard) !== Boolean(tp.is_wildcard) ||
+            (original.seeding_status || 'Main-Draw') !== (tp.seeding_status || 'Main-Draw')
           )
         })
 
@@ -514,6 +552,9 @@ export default function AdminPage() {
           }
           if (original && Boolean(original.is_wildcard) !== Boolean(item.is_wildcard)) {
             updatePayload.is_wildcard = Boolean(item.is_wildcard)
+          }
+          if (original && (original.seeding_status || 'Main-Draw') !== (item.seeding_status || 'Main-Draw')) {
+            updatePayload.seeding_status = item.seeding_status || 'Main-Draw'
           }
 
           const response = await fetch(`/api/admin/tournament-players/${item.id}`, {
@@ -537,6 +578,7 @@ export default function AdminPage() {
               appearance_probability: item.appearance_probability,
               market_value: item.market_value || 0,
               is_wildcard: Boolean(item.is_wildcard),
+              seeding_status: item.seeding_status || 'Main-Draw',
             }),
           })
           const payload = await response.json()
@@ -742,6 +784,48 @@ export default function AdminPage() {
   const currentSelectedTournament = selectedTournament
     ? tournaments.find((t) => t.id === selectedTournament.id) || selectedTournament
     : null
+
+  const normalizedPlayerSearch = playerSearchQuery.trim().toLowerCase()
+  const availablePlayers = players
+    .filter((p) => !tournamentPlayers.some((tp) => tp.player_id === p.id))
+    .filter((player) => {
+      if (!normalizedPlayerSearch) return true
+      const fullName = `${player.first_name} ${player.last_name}`.toLowerCase()
+      return fullName.includes(normalizedPlayerSearch)
+    })
+
+  const sortedTournamentPlayers = [...tournamentPlayers].sort((a, b) => {
+    const aMainSeed = a.tournament_seed_position ?? null
+    const bMainSeed = b.tournament_seed_position ?? null
+    const aQualiSeed = a.qualification_seed_position ?? null
+    const bQualiSeed = b.qualification_seed_position ?? null
+
+    const aIsMain = aMainSeed !== null
+    const bIsMain = bMainSeed !== null
+
+    if (aIsMain !== bIsMain) return aIsMain ? -1 : 1
+
+    if (aIsMain && bIsMain) {
+      return aMainSeed - bMainSeed
+    }
+
+    const aIsQuali = aQualiSeed !== null
+    const bIsQuali = bQualiSeed !== null
+
+    if (aIsQuali !== bIsQuali) return aIsQuali ? -1 : 1
+
+    if (aIsQuali && bIsQuali) {
+      return aQualiSeed - bQualiSeed
+    }
+
+    const aRanking = Number(a.player?.ranking ?? Number.MAX_SAFE_INTEGER)
+    const bRanking = Number(b.player?.ranking ?? Number.MAX_SAFE_INTEGER)
+    if (aRanking !== bRanking) return aRanking - bRanking
+
+    const aName = `${a.player?.first_name || ''} ${a.player?.last_name || ''}`.toLowerCase()
+    const bName = `${b.player?.first_name || ''} ${b.player?.last_name || ''}`.toLowerCase()
+    return aName.localeCompare(bName)
+  })
 
   return (
     <div className="min-h-screen bg-zinc-50 py-10 px-4 sm:px-6 lg:px-8">
@@ -1078,10 +1162,15 @@ export default function AdminPage() {
 
                 <div className="bg-white shadow-sm rounded-2xl border border-zinc-200 p-6">
                   <h2 className="text-lg font-semibold text-zinc-900 mb-4">Spieler hinzufügen</h2>
+                  <input
+                    type="text"
+                    value={playerSearchQuery}
+                    onChange={(e) => setPlayerSearchQuery(e.target.value)}
+                    className="w-full px-4 py-2 mb-3 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                    placeholder="Spieler suchen..."
+                  />
                   <div className="space-y-2 max-h-64 overflow-y-auto">
-                    {players
-                      .filter((p) => !tournamentPlayers.some((tp) => tp.player_id === p.id))
-                      .map((player) => (
+                    {availablePlayers.map((player) => (
                         <div
                           key={player.id}
                           className="flex items-center justify-between p-3 hover:bg-zinc-50 rounded-lg transition-colors"
@@ -1101,6 +1190,9 @@ export default function AdminPage() {
                           </button>
                         </div>
                       ))}
+                    {availablePlayers.length === 0 && (
+                      <p className="text-sm text-zinc-500 py-2">Keine passenden Spieler gefunden</p>
+                    )}
                   </div>
                 </div>
 
@@ -1110,7 +1202,7 @@ export default function AdminPage() {
                     Zugeordnete Spieler ({tournamentPlayers.length})
                   </h2>
                   <div className="space-y-3">
-                    {tournamentPlayers.map((tp) => (
+                    {sortedTournamentPlayers.map((tp) => (
                       <div key={tp.id} className="p-4 border border-zinc-200 rounded-xl hover:shadow-sm transition-shadow">
                         <div className="flex items-center justify-between mb-3">
                           <div className="flex items-center gap-3">
@@ -1138,6 +1230,32 @@ export default function AdminPage() {
                               />
                               Wildcard (erzwingt Garantiert)
                             </label>
+                          </div>
+                          <div className="mb-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs font-medium text-zinc-600 mb-1">Seeding</label>
+                              <select
+                                value={tp.seeding_status || 'Main-Draw'}
+                                onChange={(e) => updatePlayerSeedingStatus(tp.id, e.target.value as typeof seedingStatusOptions[number])}
+                                className="w-full px-3 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 text-sm"
+                              >
+                                {seedingStatusOptions.map((option) => (
+                                  <option key={option} value={option}>{option}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="flex items-end gap-2">
+                              {tp.tournament_seed_position ? (
+                                <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">
+                                  Hauptfeld Setzung #{tp.tournament_seed_position}
+                                </span>
+                              ) : null}
+                              {tp.qualification_seed_position ? (
+                                <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-800">
+                                  Quali Setzung #{tp.qualification_seed_position}
+                                </span>
+                              ) : null}
+                            </div>
                           </div>
                           <label className="block text-xs font-medium text-zinc-600 mb-2">Auftrittswahrscheinlichkeit</label>
                           <div className="grid grid-cols-2 gap-2">

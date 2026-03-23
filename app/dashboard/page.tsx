@@ -240,14 +240,14 @@ export default async function DashboardPage() {
               {upcomingTournaments && upcomingTournaments.length > 0 ? (
                 <ul className="space-y-3">
                   {(upcomingTournaments as UpcomingTournament[]).map((tournament) => (
-                    <li key={tournament.id} className="rounded-xl border border-zinc-100 bg-zinc-50 p-3">
+                    <li key={tournament.id} className="rounded-xl border border-zinc-100 bg-zinc-50 p-3 transition-colors hover:border-emerald-300">
                       {(() => {
                         const tournamentType = findTournamentTypeOption(
                           getTournamentTypeValue(tournament.tournament_category, tournament.singles_player_count)
                         )
 
                         return (
-                          <>
+                          <Link href={`/dashboard/tournaments/${tournament.id}`} className="block">
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-2 min-w-0">
                           {countryCodeToFlag(tournament.country_code) ? (
@@ -284,7 +284,8 @@ export default async function DashboardPage() {
                           </div>
                         ) : null
                       })()}
-                          </>
+                            <p className="mt-3 text-xs font-medium text-emerald-700">Spieler im Main Draw anzeigen</p>
+                          </Link>
                         )
                       })()}
                     </li>
