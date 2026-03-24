@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient as createServerAuthClient } from '@/utils/supabase/server'
-import { createAdminClient, refillTransferMarketForActiveTournament, assignInitialTeamLineups, resetAllTeamBudgets } from '@/lib/transfer-market'
+import { createAdminClient, refillTransferMarketForActiveTournament } from '@/lib/transfer-market'
 import { findTournamentTypeOption } from '@/lib/tournament-types'
 
 function getAdminClient() {
@@ -26,6 +26,7 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   const status = body?.status as string | undefined
   const startBudget = body?.start_budget as number | undefined
   const starterTeamTargetValue = body?.starter_team_target_value as number | undefined
+  const starterTeamPlayerCount = body?.starter_team_player_count as number | undefined
   const countryCodeRaw = body?.country_code as string | null | undefined
   const previousWinnerPlayerIdRaw = body?.previous_winner_player_id as string | null | undefined
   const tournamentTypeRaw = body?.tournament_type as string | null | undefined
@@ -59,6 +60,13 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       return NextResponse.json({ error: 'starter_team_target_value must be a non-negative number' }, { status: 400 })
     }
     updateData.starter_team_target_value = starterTeamTargetValue
+  }
+
+  if (starterTeamPlayerCount !== undefined) {
+    if (!Number.isInteger(starterTeamPlayerCount) || starterTeamPlayerCount <= 0) {
+      return NextResponse.json({ error: 'starter_team_player_count must be a positive integer' }, { status: 400 })
+    }
+    updateData.starter_team_player_count = starterTeamPlayerCount
   }
 
   if (countryCodeRaw !== undefined) {
@@ -95,16 +103,6 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   const supabase = getAdminClient()
   
   if (isActive === true) {
-    // Ensure only one active tournament at a time.
-    const { error: deactivateOthersError } = await supabase
-      .from('tournaments')
-      .update({ is_active: false })
-      .neq('id', id)
-
-    if (deactivateOthersError) {
-      return NextResponse.json({ error: deactivateOthersError.message, code: deactivateOthersError.code }, { status: 500 })
-    }
-
     const { data: activatedTournament, error: activateError } = await supabase
       .from('tournaments')
       .update(updateData)
@@ -116,20 +114,10 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       return NextResponse.json({ error: activateError.message, code: activateError.code }, { status: 500 })
     }
 
-    // Reset league state for the newly active tournament.
+    // When activating tournaments, only reset transfer market state.
     const { error: clearAuctionsError } = await supabase.from('market_auctions').delete().not('id', 'is', null)
     if (clearAuctionsError) {
       return NextResponse.json({ error: clearAuctionsError.message, code: clearAuctionsError.code }, { status: 500 })
-    }
-
-    const { error: clearTeamPlayersError } = await supabase.from('team_players').delete().not('team_id', 'is', null)
-    if (clearTeamPlayersError) {
-      return NextResponse.json({ error: clearTeamPlayersError.message, code: clearTeamPlayersError.code }, { status: 500 })
-    }
-
-    const { error: clearLineupsError } = await supabase.from('tournament_lineups').delete().not('tournament_id', 'is', null)
-    if (clearLineupsError) {
-      return NextResponse.json({ error: clearLineupsError.message, code: clearLineupsError.code }, { status: 500 })
     }
 
     const { error: clearRotationError } = await supabase.from('market_player_rotation').delete().not('league_id', 'is', null)
@@ -137,56 +125,8 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       return NextResponse.json({ error: clearRotationError.message, code: clearRotationError.code }, { status: 500 })
     }
 
-    const { error: clearLeagueNewsError } = await supabase.from('league_news').delete().not('id', 'is', null)
-    if (clearLeagueNewsError) {
-      return NextResponse.json({ error: clearLeagueNewsError.message, code: clearLeagueNewsError.code }, { status: 500 })
-    }
-
-    const { error: clearSalesHistoryError } = await supabase.from('player_sales_history').delete().not('id', 'is', null)
-    if (clearSalesHistoryError) {
-      return NextResponse.json({ error: clearSalesHistoryError.message, code: clearSalesHistoryError.code }, { status: 500 })
-    }
-
-    try {
-      await resetAllTeamBudgets(supabase, Number(activatedTournament?.start_budget ?? 1000000))
-    } catch (budgetError: any) {
-      return NextResponse.json({ error: budgetError.message || 'Fehler beim Zurücksetzen des Startbudgets' }, { status: 500 })
-    }
-
-    // Assign initial team players (8 players per team) BEFORE filling transfer market
-    let lineupSummary
-    try {
-      lineupSummary = await assignInitialTeamLineups(
-        supabase,
-        id,
-        Number(activatedTournament?.starter_team_target_value ?? 0)
-      )
-    } catch (assignError: any) {
-      // Roll back the tournament activation if lineup assignment fails
-      await supabase
-        .from('tournaments')
-        .update({ is_active: false })
-        .eq('id', id)
-      
-      return NextResponse.json({ 
-        error: assignError.message || 'Fehler beim Zuweisen der Spieler', 
-        details: 'Turnier konnte nicht aktiviert werden. Bitte weise ausreichend Spieler außerhalb der Top 20 dem Turnier zu.'
-      }, { status: 400 })
-    }
-
     const refillSummary = await refillTransferMarketForActiveTournament(supabase)
-
-    const { data: tournament, error: tournamentError } = await supabase
-      .from('tournaments')
-      .select('*')
-      .eq('id', id)
-      .single()
-
-    if (tournamentError) {
-      return NextResponse.json({ error: tournamentError.message, code: tournamentError.code }, { status: 500 })
-    }
-
-    return NextResponse.json({ tournament, refillSummary, lineupSummary })
+    return NextResponse.json({ tournament: activatedTournament, refillSummary })
   }
 
   const { data, error } = await supabase

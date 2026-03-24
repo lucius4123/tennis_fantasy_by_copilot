@@ -13,6 +13,7 @@ interface Tournament {
   status: 'upcoming' | 'on-going' | 'completed'
   start_budget: number
   starter_team_target_value: number
+  starter_team_player_count: number
   country_code: string | null
   previous_winner_player_id: string | null
   tournament_category: string | null
@@ -139,6 +140,7 @@ export default function AdminPage() {
   const [newTournamentDate, setNewTournamentDate] = useState('')
   const [newTournamentStartBudget, setNewTournamentStartBudget] = useState(1000000)
   const [newTournamentStarterTeamTargetValue, setNewTournamentStarterTeamTargetValue] = useState(0)
+  const [newTournamentStarterTeamPlayerCount, setNewTournamentStarterTeamPlayerCount] = useState(8)
   const [newTournamentCountryCode, setNewTournamentCountryCode] = useState('')
   const [newTournamentPreviousWinnerPlayerId, setNewTournamentPreviousWinnerPlayerId] = useState('')
   const [newTournamentType, setNewTournamentType] = useState('')
@@ -191,6 +193,7 @@ export default function AdminPage() {
         is_active: Boolean(t.is_active),
         start_budget: Number(t.start_budget ?? 1000000),
         starter_team_target_value: Number(t.starter_team_target_value ?? 0),
+        starter_team_player_count: Number(t.starter_team_player_count ?? 8),
         country_code: t.country_code ? String(t.country_code).toUpperCase() : null,
         previous_winner_player_id: t.previous_winner_player_id || null,
         tournament_category: t.tournament_category || null,
@@ -249,6 +252,11 @@ export default function AdminPage() {
       return
     }
 
+    if (!Number.isInteger(newTournamentStarterTeamPlayerCount) || newTournamentStarterTeamPlayerCount <= 0) {
+      alert('Die Anzahl der Starterteam-Spieler muss mindestens 1 sein')
+      return
+    }
+
     const normalizedCountryCode = newTournamentCountryCode.trim().toUpperCase()
     if (normalizedCountryCode && !/^[A-Z]{2}$/.test(normalizedCountryCode)) {
       alert('Land muss als ISO-2 Code angegeben werden (z. B. DE)')
@@ -263,6 +271,7 @@ export default function AdminPage() {
       status: 'upcoming',
       start_budget: newTournamentStartBudget,
       starter_team_target_value: newTournamentStarterTeamTargetValue,
+      starter_team_player_count: newTournamentStarterTeamPlayerCount,
       country_code: normalizedCountryCode || null,
       previous_winner_player_id: newTournamentPreviousWinnerPlayerId || null,
       tournament_category: findTournamentTypeOption(newTournamentType)?.category ?? null,
@@ -275,6 +284,7 @@ export default function AdminPage() {
     setNewTournamentDate('')
     setNewTournamentStartBudget(1000000)
     setNewTournamentStarterTeamTargetValue(0)
+    setNewTournamentStarterTeamPlayerCount(8)
     setNewTournamentCountryCode('')
     setNewTournamentPreviousWinnerPlayerId('')
     setNewTournamentType('')
@@ -292,11 +302,7 @@ export default function AdminPage() {
     const nextActive = !tournament.is_active
 
     setTournaments((prev) =>
-      prev.map((t) => {
-        if (t.id === tournament.id) return { ...t, is_active: nextActive }
-        if (nextActive) return { ...t, is_active: false }
-        return t
-      })
+      prev.map((t) => (t.id === tournament.id ? { ...t, is_active: nextActive } : t))
     )
 
     setHasUnsavedChanges(true)
@@ -446,6 +452,7 @@ export default function AdminPage() {
               startDate: tournament.start_date,
               start_budget: tournament.start_budget,
               starter_team_target_value: tournament.starter_team_target_value,
+              starter_team_player_count: tournament.starter_team_player_count,
               country_code: tournament.country_code,
               previous_winner_player_id: tournament.previous_winner_player_id,
               tournament_type: tournament.tournament_type,
@@ -473,6 +480,7 @@ export default function AdminPage() {
           original.status !== t.status ||
           original.start_budget !== t.start_budget ||
           original.starter_team_target_value !== t.starter_team_target_value ||
+          original.starter_team_player_count !== t.starter_team_player_count ||
           (original.country_code || null) !== (t.country_code || null) ||
           (original.previous_winner_player_id || null) !== (t.previous_winner_player_id || null) ||
           (original.tournament_type || null) !== (t.tournament_type || null)
@@ -494,6 +502,9 @@ export default function AdminPage() {
         }
         if (original && original.starter_team_target_value !== tournament.starter_team_target_value) {
           updatePayload.starter_team_target_value = tournament.starter_team_target_value
+        }
+        if (original && original.starter_team_player_count !== tournament.starter_team_player_count) {
+          updatePayload.starter_team_player_count = tournament.starter_team_player_count
         }
         if (original && (original.country_code || null) !== (tournament.country_code || null)) {
           updatePayload.country_code = tournament.country_code || null
@@ -941,6 +952,15 @@ export default function AdminPage() {
                   placeholder="Zielwert Starterteam"
                 />
                 <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={newTournamentStarterTeamPlayerCount}
+                  onChange={(e) => setNewTournamentStarterTeamPlayerCount(e.target.value === '' ? 1 : parseInt(e.target.value))}
+                  className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                  placeholder="Anzahl Spieler im Starterteam"
+                />
+                <input
                   type="text"
                   maxLength={2}
                   value={newTournamentCountryCode}
@@ -1024,7 +1044,7 @@ export default function AdminPage() {
                         <h3 className="font-semibold text-zinc-900">{tournament.name}</h3>
                         <p className="text-sm text-zinc-500">{new Date(tournament.start_date).toLocaleDateString('de-DE')}</p>
                         <p className="text-xs text-zinc-500 mt-1">
-                          Startkapital: {tournament.start_budget.toLocaleString('de-DE')}€ · Starterteam-Ziel: {tournament.starter_team_target_value.toLocaleString('de-DE')}€
+                          Startkapital: {tournament.start_budget.toLocaleString('de-DE')}€ · Starterteam-Ziel: {tournament.starter_team_target_value.toLocaleString('de-DE')}€ · Starterteam-Spieler: {tournament.starter_team_player_count}
                         </p>
                         {tournament.tournament_type ? (
                           <p className="text-xs text-zinc-500 mt-1">
@@ -1106,6 +1126,17 @@ export default function AdminPage() {
                       />
                     </div>
                     <div>
+                      <label className="block text-sm font-medium text-zinc-700 mb-1">Spieler im Starterteam</label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={currentSelectedTournament.starter_team_player_count}
+                        onChange={(e) => updateTournamentSettings(currentSelectedTournament.id, { starter_team_player_count: e.target.value === '' ? 1 : parseInt(e.target.value) })}
+                        className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                      />
+                    </div>
+                    <div>
                       <label className="block text-sm font-medium text-zinc-700 mb-1">Land (ISO-2)</label>
                       <input
                         type="text"
@@ -1156,7 +1187,7 @@ export default function AdminPage() {
                     </div>
                   </div>
                   <p className="text-xs text-zinc-500 mt-3">
-                    Beim Aktivieren des Turniers wird das Budget aller Teams auf das Startkapital gesetzt und die Starterteams werden auf den Zielwert angenähert verteilt.
+                    Beim Aktivieren werden nur Transfermarkt-Rotation und laufende Marktangebote zurückgesetzt.
                   </p>
                 </div>
 

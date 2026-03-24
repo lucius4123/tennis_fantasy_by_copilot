@@ -1,1 +1,31 @@
 @import "tailwindcss";
+
+@keyframes bottom-sheet-up {
+	from {
+		opacity: 0;
+		transform: translateY(24px);
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+@keyframes bottom-sheet-fade {
+	from {
+		opacity: 0;
+	}
+
+	to {
+		opacity: 1;
+	}
+}
+
+.bottom-sheet-backdrop {
+	animation: bottom-sheet-fade 180ms ease-out;
+}
+
+.bottom-sheet-panel {
+	animation: bottom-sheet-up 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}

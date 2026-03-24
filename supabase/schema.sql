@@ -211,6 +211,7 @@ CREATE TABLE tournaments (
     is_active BOOLEAN DEFAULT false,
     start_budget INT DEFAULT 1000000,
     starter_team_target_value INT DEFAULT 0,
+    starter_team_player_count INT DEFAULT 8 CHECK (starter_team_player_count > 0),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 

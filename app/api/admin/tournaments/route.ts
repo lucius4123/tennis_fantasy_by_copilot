@@ -47,6 +47,7 @@ export async function POST(request: NextRequest) {
   const startDate = body?.startDate as string
   const startBudget = body?.start_budget as number | undefined
   const starterTeamTargetValue = body?.starter_team_target_value as number | undefined
+  const starterTeamPlayerCount = body?.starter_team_player_count as number | undefined
   const countryCodeRaw = body?.country_code as string | undefined
   const previousWinnerPlayerIdRaw = body?.previous_winner_player_id as string | null | undefined
   const tournamentTypeRaw = body?.tournament_type as string | null | undefined
@@ -61,6 +62,10 @@ export async function POST(request: NextRequest) {
 
   if (starterTeamTargetValue !== undefined && (!Number.isFinite(starterTeamTargetValue) || starterTeamTargetValue < 0)) {
     return NextResponse.json({ error: 'starter_team_target_value must be a non-negative number' }, { status: 400 })
+  }
+
+  if (starterTeamPlayerCount !== undefined && (!Number.isInteger(starterTeamPlayerCount) || starterTeamPlayerCount <= 0)) {
+    return NextResponse.json({ error: 'starter_team_player_count must be a positive integer' }, { status: 400 })
   }
 
   const countryCode = countryCodeRaw?.trim().toUpperCase()
@@ -88,6 +93,7 @@ export async function POST(request: NextRequest) {
       status: 'upcoming',
       start_budget: startBudget ?? 1000000,
       starter_team_target_value: starterTeamTargetValue ?? 0,
+      starter_team_player_count: starterTeamPlayerCount ?? 8,
       country_code: countryCode || null,
       previous_winner_player_id: previousWinnerPlayerId,
       tournament_category: tournamentTypeOption?.category ?? null,
