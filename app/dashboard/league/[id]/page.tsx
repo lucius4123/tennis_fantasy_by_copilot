@@ -45,6 +45,8 @@ interface Player {
   image_url?: string;
   appearance_probability?: string;
   is_wildcard?: boolean;
+  seeding_status?: string | null;
+  tournament_seed_position?: number | null;
 }
 
 interface PlayerMatch {
@@ -70,6 +72,7 @@ interface Tournament {
   start_date: string;
   is_active?: boolean;
   status?: 'upcoming' | 'on-going' | 'completed';
+  country_code?: string | null;
 }
 
 interface LeagueNews {
@@ -191,6 +194,7 @@ const countryAliasToAlpha2: Record<string, string> = {
   UNITEDKINGDOM: 'GB',
   UNITEDSTATES: 'US',
   USA: 'US',
+  MONACO: 'MC',
 };
 
 const normalizeCountryKey = (country?: string | null) => {
@@ -236,6 +240,37 @@ const tournamentAccentClasses = [
   'bg-fuchsia-500',
 ];
 
+const tournamentCourtSurfaceClasses: Record<string, { upcoming: string; ongoing: string }> = {
+  'bg-sky-500': {
+    upcoming: 'bg-gradient-to-br from-sky-500 via-cyan-500 to-sky-700 border-sky-300',
+    ongoing: 'bg-gradient-to-br from-sky-700 via-cyan-700 to-sky-900 border-sky-500',
+  },
+  'bg-rose-500': {
+    upcoming: 'bg-gradient-to-br from-rose-500 via-pink-500 to-rose-700 border-rose-300',
+    ongoing: 'bg-gradient-to-br from-rose-700 via-pink-700 to-rose-900 border-rose-500',
+  },
+  'bg-emerald-500': {
+    upcoming: 'bg-gradient-to-br from-emerald-500 via-teal-500 to-emerald-700 border-emerald-300',
+    ongoing: 'bg-gradient-to-br from-emerald-700 via-teal-700 to-emerald-900 border-emerald-500',
+  },
+  'bg-amber-500': {
+    upcoming: 'bg-gradient-to-br from-amber-500 via-orange-500 to-amber-700 border-amber-300',
+    ongoing: 'bg-gradient-to-br from-amber-700 via-orange-700 to-amber-900 border-amber-500',
+  },
+  'bg-cyan-500': {
+    upcoming: 'bg-gradient-to-br from-cyan-500 via-sky-500 to-cyan-700 border-cyan-300',
+    ongoing: 'bg-gradient-to-br from-cyan-700 via-sky-700 to-cyan-900 border-cyan-500',
+  },
+  'bg-fuchsia-500': {
+    upcoming: 'bg-gradient-to-br from-fuchsia-500 via-purple-500 to-fuchsia-700 border-fuchsia-300',
+    ongoing: 'bg-gradient-to-br from-fuchsia-700 via-purple-700 to-fuchsia-900 border-fuchsia-500',
+  },
+  'bg-zinc-400': {
+    upcoming: 'bg-gradient-to-br from-zinc-400 via-slate-400 to-zinc-600 border-zinc-300',
+    ongoing: 'bg-gradient-to-br from-zinc-600 via-slate-700 to-zinc-800 border-zinc-500',
+  },
+};
+
 const getFallbackTournamentAccentClass = (tournamentId?: string | null) => {
   if (!tournamentId) return 'bg-zinc-400';
 
@@ -258,6 +293,15 @@ const getSeedingBadgeClass = (seedingStatus?: string | null) => {
 
 const hasPrioritySeedingStar = (seedingStatus?: string | null) => {
   return seedingStatus === 'Top-Seed' || seedingStatus === 'Gesetzt' || seedingStatus === 'Main-Draw';
+};
+
+const getSeedingIconLabel = (seedingStatus?: string | null) => {
+  if (!seedingStatus) return null;
+  if (seedingStatus === 'Top-Seed') return 'TS';
+  if (seedingStatus === 'Gesetzt') return 'S';
+  if (seedingStatus === 'Main-Draw') return 'MD';
+  if (seedingStatus.startsWith('Qualifikation')) return 'Q';
+  return 'S';
 };
 
 export default function LeaguePage() {
@@ -290,6 +334,7 @@ export default function LeaguePage() {
   const [playerToSell, setPlayerToSell] = useState<Player | null>(null);
   const [showSaleModal, setShowSaleModal] = useState(false);
   const [sellLoading, setSellLoading] = useState(false);
+  const [myTeamStatMode, setMyTeamStatMode] = useState<'points' | 'market'>('points');
   const [marketTournamentFilterId, setMarketTournamentFilterId] = useState<string>('all');
   const [playerMarketValues, setPlayerMarketValues] = useState<Map<string, number>>(new Map());
   const [isLineupEditMode, setIsLineupEditMode] = useState(false);
@@ -307,6 +352,8 @@ export default function LeaguePage() {
   const touchStartPointRef = useRef<{ x: number; y: number } | null>(null);
   const myLeaderboardRowRef = useRef<HTMLLIElement | null>(null);
   const [isMyLeaderboardRowVisible, setIsMyLeaderboardRowVisible] = useState(true);
+  const tabNavRef = useRef<HTMLElement | null>(null);
+  const tabButtonRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   const tournamentAccentClassById = useMemo(() => {
     const map = new Map<string, string>();
@@ -323,6 +370,7 @@ export default function LeaguePage() {
 
   const formatCurrency = (value: number) => `${value.toLocaleString('de-DE')}€`;
   const sportyNumberClass = 'font-mono tabular-nums tracking-tight';
+  const wildcardBadgeClass = 'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold bg-emerald-700 text-emerald-50 border border-emerald-500';
 
   const getTournamentAccentClassByMeta = (tournamentName?: string | null, tournamentId?: string | null) => {
     const normalizedName = (tournamentName || '').toLowerCase();
@@ -348,11 +396,21 @@ export default function LeaguePage() {
     [myTeam, playerMarketValues]
   );
 
-  const myTeamPlaceholderCount = Math.max(TOTAL_LINEUP_SLOT_COUNT - myTeam.length, 0);
-
   const getAuctionDisplayFirstName = (auction: Auction) => auction.player.last_name;
 
   const getAuctionDisplayLastName = (auction: Auction) => auction.player.first_name;
+
+  const shouldShowProbabilityIcon = (probability?: string) => {
+    return Boolean(probability && probability !== 'Garantiert');
+  };
+
+  const getCompactPlayerDisplayName = (
+    player: Pick<Player, 'first_name' | 'last_name'>,
+    maxLength = 20
+  ) => {
+    const fullName = `${player.first_name} ${player.last_name}`.trim();
+    return fullName.length > maxLength ? player.last_name : fullName;
+  };
 
   // Helper function to get icon for appearance probability
   const getProbabilityIcon = (probability?: string) => {
@@ -611,6 +669,19 @@ export default function LeaguePage() {
     return () => observer.disconnect();
   }, [activeTab, leaderboard]);
 
+  useEffect(() => {
+    const tabList = ['leaderboard', 'auctions', 'myteam', 'tournaments', 'news'];
+    const tabIndex = tabList.indexOf(activeTab);
+    if (tabIndex === -1 || tabIndex === tabList.length - 1) return;
+    const nav = tabNavRef.current;
+    const button = tabButtonRefs.current[tabIndex];
+    if (!nav || !button) return;
+    const navRect = nav.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    const scrollLeft = nav.scrollLeft + buttonRect.left - navRect.left - navRect.width / 2 + buttonRect.width / 2;
+    nav.scrollTo({ left: Math.max(0, scrollLeft), behavior: 'smooth' });
+  }, [activeTab]);
+
   const loadLeaderboard = async () => {
     const { data } = await supabase
       .from('fantasy_teams')
@@ -631,6 +702,7 @@ export default function LeaguePage() {
       .order('slot_index', { ascending: true });
 
     const nextSlots = createEmptyLineupSlots(TOTAL_LINEUP_SLOT_COUNT);
+    const playerDetailsById = new Map(myTeam.map((player) => [player.id, player]));
     for (const entry of data || []) {
       const player = Array.isArray((entry as any).player) ? (entry as any).player[0] : (entry as any).player;
       const slotIndex = Number((entry as any).slot_index);
@@ -640,7 +712,8 @@ export default function LeaguePage() {
       if (allowedPlayerIds && !allowedPlayerIds.has(player.id)) {
         continue;
       }
-      nextSlots[slotIndex] = player;
+      const enrichedPlayer = playerDetailsById.get(player.id);
+      nextSlots[slotIndex] = enrichedPlayer || player;
     }
 
     setLineupSlots(nextSlots);
@@ -1142,13 +1215,18 @@ const loadAuctions = async () => {
       return [] as Player[];
     }
 
-    const probabilityMap = new Map<string, { appearance_probability?: string; is_wildcard?: boolean }>();
+    const probabilityMap = new Map<string, {
+      appearance_probability?: string;
+      is_wildcard?: boolean;
+      seeding_status?: string | null;
+      tournament_seed_position?: number | null;
+    }>();
     const selectedTournamentId = tournamentId || activeTournamentId;
 
     if (selectedTournamentId) {
       const { data: probabilities, error: probabilitiesError } = await supabase
         .from('tournament_players')
-        .select('player_id, appearance_probability, is_wildcard')
+        .select('player_id, appearance_probability, is_wildcard, seeding_status, tournament_seed_position')
         .eq('tournament_id', selectedTournamentId)
         .in('player_id', playerIds);
 
@@ -1160,6 +1238,8 @@ const loadAuctions = async () => {
         probabilityMap.set(probability.player_id, {
           appearance_probability: probability.appearance_probability,
           is_wildcard: Boolean(probability.is_wildcard),
+          seeding_status: probability.seeding_status || null,
+          tournament_seed_position: probability.tournament_seed_position ?? null,
         });
       }
     }
@@ -1169,6 +1249,8 @@ const loadAuctions = async () => {
         ...player,
         appearance_probability: probabilityMap.get(player.id)?.appearance_probability,
         is_wildcard: probabilityMap.get(player.id)?.is_wildcard,
+        seeding_status: probabilityMap.get(player.id)?.seeding_status,
+        tournament_seed_position: probabilityMap.get(player.id)?.tournament_seed_position,
       }))
       .filter((player) => {
         if (!selectedTournamentId) return true;
@@ -1273,7 +1355,7 @@ const loadAuctions = async () => {
   const loadTournaments = async () => {
     const { data } = await supabase
       .from('tournaments')
-      .select('id, name, start_date, status, is_active')
+      .select('id, name, start_date, status, is_active, country_code')
       .eq('is_active', true)
       .order('start_date', { ascending: true });
 
@@ -1837,7 +1919,22 @@ const loadAuctions = async () => {
     const index = leaderboard.findIndex((team) => team.id === teamInspection.team.id);
     return index >= 0 ? index + 1 : null;
   }, [leaderboard, teamInspection]);
+  const sortedMyTeamPlayers = useMemo(() => {
+    const next = [...myTeam];
+
+    next.sort((left, right) => {
+      if (myTeamStatMode === 'market') {
+        return (playerMarketValues.get(right.id) || 0) - (playerMarketValues.get(left.id) || 0);
+      }
+      return (playerTournamentPoints.get(right.id) || 0) - (playerTournamentPoints.get(left.id) || 0);
+    });
+
+    return next;
+  }, [myTeam, myTeamStatMode, playerMarketValues, playerTournamentPoints]);
   const reserveLineupSlots = lineupSlots.slice(RESERVE_SLOT_START_INDEX);
+  const activeCourtAccentClass = getTournamentAccentClassByMeta(activeTournament?.name, activeTournament?.id);
+  const courtSurfacePalette = tournamentCourtSurfaceClasses[activeCourtAccentClass] || tournamentCourtSurfaceClasses['bg-zinc-400'];
+  const courtSurfaceClass = isLineupLocked ? courtSurfacePalette.ongoing : courtSurfacePalette.upcoming;
   const inspectionLineupPositions = [
     'left-3 top-4 sm:left-8 sm:top-6',
     'right-3 top-4 sm:right-8 sm:top-6',
@@ -1851,14 +1948,16 @@ const loadAuctions = async () => {
 
       {/* tabs */}
       <nav
+        ref={tabNavRef}
         className={`sticky top-0 z-30 -mx-6 border-b border-zinc-200 bg-zinc-50/95 px-6 pt-2 backdrop-blur-md overflow-x-auto ${
-          activeTab === 'auctions' ? 'mb-4' : 'mb-8'
+          activeTab === 'auctions' ? 'mb-4' : activeTab === 'myteam' || activeTab === 'tournaments' ? 'mb-4' : 'mb-8'
         }`}
       >
         <div className="grid grid-flow-col auto-cols-fr gap-2 min-w-[640px]">
-          {['leaderboard','auctions','myteam','tournaments','news'].map(tab => (
+          {['leaderboard','auctions','myteam','tournaments','news'].map((tab, index) => (
             <button
               key={tab}
+              ref={(el) => { tabButtonRefs.current[index] = el; }}
               onClick={() => setActiveTab(tab)}
               className={`w-full pb-2 text-sm font-medium transition-colors whitespace-nowrap ${activeTab === tab ? 'border-b-2 border-emerald-600 text-emerald-600' : 'text-zinc-600 hover:text-zinc-900'}`}
             >
@@ -2113,7 +2212,7 @@ const loadAuctions = async () => {
                         onClick={() => toggleAuctionGroupCollapse(groupKey)}
                         aria-expanded={!isGroupCollapsed}
                         aria-controls={groupContentId}
-                        className="sticky top-0 z-10 w-full rounded-xl border border-white/70 bg-white/70 px-3 py-2 text-left shadow-[0_10px_24px_rgba(15,23,42,0.08)] backdrop-blur-[10px]"
+                        className="sticky top-[56px] z-10 w-full rounded-xl border border-white/70 bg-white/70 px-3 py-2 text-left shadow-[0_10px_24px_rgba(15,23,42,0.08)] backdrop-blur-[10px]"
                       >
                         <div className="flex items-stretch gap-2">
                           <div className="min-w-0 flex flex-1 items-center max-w-[66%] rounded-lg border border-zinc-200/80 bg-white/85 px-2.5 py-1.5">
@@ -2201,12 +2300,9 @@ const loadAuctions = async () => {
                                           <span className="font-bold text-zinc-900">{getAuctionDisplayLastName(auction)}</span>
                                         </p>
                                         <div className="flex items-center gap-1.5 mt-1">
-                                          <span className={`text-sm ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
-                                          {isWildcard && (
-                                            <span className="inline-flex items-center rounded-md bg-emerald-900 px-1.5 py-0.5 text-[10px] font-bold text-emerald-50" title="Wildcard">
-                                              WC
-                                            </span>
-                                          )}
+                                          {shouldShowProbabilityIcon(auction.appearance_probability) ? (
+                                            <span className={`text-sm ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
+                                          ) : null}
                                           {seedingLabel && (
                                             <span
                                               className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${seedingBadgeClass}`}
@@ -2217,6 +2313,11 @@ const loadAuctions = async () => {
                                                 <Star className="h-3 w-3 text-amber-300" fill="currentColor" strokeWidth={1.6} />
                                               ) : null}
                                               {seedingLabel}
+                                            </span>
+                                          )}
+                                          {isWildcard && (
+                                            <span className={wildcardBadgeClass} title="Wildcard">
+                                              WC
                                             </span>
                                           )}
                                         </div>
@@ -2341,21 +2442,6 @@ const loadAuctions = async () => {
         <div className="space-y-4">
           <div className="-mx-6 mb-4 border-b border-zinc-200/70 bg-zinc-50/90 px-6 pb-4 pt-3 backdrop-blur-md">
             <div className="flex flex-col gap-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <h2 className="text-lg font-bold tracking-tight text-zinc-900" style={{ fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif' }}>
-                    Mein Team
-                  </h2>
-                  <p className="mt-1 text-sm text-zinc-500">
-                    Kompakte Uebersicht mit Form, Marktwert und direktem Zugriff auf Transfers.
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-white/70 bg-white/75 px-3 py-2 text-right shadow-[0_10px_30px_rgba(15,23,42,0.07)] backdrop-blur-[10px]">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Kader</p>
-                  <p className="text-lg font-bold text-zinc-900">{myTeam.length}<span className="ml-1 text-sm font-medium text-zinc-500">Spieler</span></p>
-                </div>
-              </div>
-
               <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                 {tournaments.map((tournament) => {
                   const accentClass = getTournamentAccentClassByMeta(tournament.name, tournament.id);
@@ -2369,7 +2455,7 @@ const loadAuctions = async () => {
                         closeLineupEditMode();
                         setLineupSlots(createEmptyLineupSlots(TOTAL_LINEUP_SLOT_COUNT));
                       }}
-                      className={`shrink-0 rounded-full border px-3 py-1.5 text-xs font-semibold transition-all duration-200 active:scale-95 ${isSelected ? `${accentClass} border-transparent text-white shadow-sm` : 'border-zinc-300 bg-white text-zinc-600 hover:border-zinc-400 hover:text-zinc-900'}`}
+                      className={`shrink-0 rounded-2xl border px-3.5 py-1.5 text-xs font-semibold transition-all duration-200 active:scale-95 ${isSelected ? `${accentClass} border-transparent text-white shadow-[0_6px_14px_rgba(15,23,42,0.16)]` : 'border-zinc-300 bg-zinc-50 text-zinc-600 hover:border-zinc-400 hover:bg-white hover:text-zinc-900'}`}
                     >
                       {tournament.name}
                     </button>
@@ -2377,23 +2463,67 @@ const loadAuctions = async () => {
                 })}
               </div>
 
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                <div className="rounded-2xl border border-emerald-200 bg-white/85 px-3 py-2.5 shadow-[0_10px_30px_rgba(16,185,129,0.07)] backdrop-blur-[10px]">
+              {activeTournament ? (
+                (() => {
+                  const tournamentFlag = countryCodeToFlag(activeTournament.country_code || null);
+                  const accentClass = getTournamentAccentClassByMeta(activeTournament.name, activeTournament.id);
+
+                  return (
+                    <div className="rounded-xl border border-white/70 bg-white/70 px-3 py-2 shadow-[0_10px_24px_rgba(15,23,42,0.08)] backdrop-blur-[10px]">
+                      <div className="flex items-stretch gap-2">
+                        <div className="min-w-0 flex flex-1 items-center rounded-lg border border-zinc-200/80 bg-white/85 px-2.5 py-1.5">
+                          <div className="min-w-0 flex w-full items-center justify-between gap-2">
+                            <span className="truncate text-xs font-semibold uppercase tracking-wide text-zinc-600">
+                              {tournamentFlag ? `${tournamentFlag} ` : ''}
+                              {activeTournament.name}
+                            </span>
+                            <span className="rounded-full border border-zinc-200 bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-600">
+                              Mein Team
+                            </span>
+                          </div>
+                        </div>
+                        {myBudget !== null && (
+                          <div className={`inline-flex shrink-0 items-center gap-2 rounded-lg border border-white/35 px-3 py-1.5 text-zinc-100 shadow-[0_8px_18px_rgba(15,23,42,0.22)] ${accentClass}`}>
+                            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/20 text-emerald-300">
+                              <Coins className="h-3.5 w-3.5" strokeWidth={2.1} />
+                            </span>
+                            <div className="leading-none">
+                              <p className="text-[9px] uppercase tracking-[0.16em] text-white/80">Wallet</p>
+                              <p className={`mt-0.5 text-sm font-extrabold text-emerald-200 ${sportyNumberClass}`}>
+                                {formatCurrency(myBudget)}
+                              </p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()
+              ) : (
+                <div className="min-w-0">
+                  <h2 className="text-lg font-bold tracking-tight text-zinc-900" style={{ fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif' }}>
+                    Mein Team
+                  </h2>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMyTeamStatMode('market')}
+                  className={`rounded-2xl border bg-white/85 px-3 py-2.5 text-left shadow-[0_10px_30px_rgba(16,185,129,0.07)] backdrop-blur-[10px] transition-colors ${myTeamStatMode === 'market' ? 'border-emerald-400 ring-1 ring-emerald-300' : 'border-emerald-200 hover:border-emerald-300'}`}
+                >
                   <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Gesamtwert</p>
                   <p className="mt-1 text-lg font-bold text-emerald-800">{formatCurrency(myTeamTotalMarketValue)}</p>
-                </div>
-                <div className="rounded-2xl border border-zinc-200 bg-white/85 px-3 py-2.5 shadow-[0_10px_30px_rgba(15,23,42,0.05)] backdrop-blur-[10px]">
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMyTeamStatMode('points')}
+                  className={`rounded-2xl border bg-white/85 px-3 py-2.5 text-left shadow-[0_10px_30px_rgba(15,23,42,0.05)] backdrop-blur-[10px] transition-colors ${myTeamStatMode === 'points' ? 'border-zinc-400 ring-1 ring-zinc-300' : 'border-zinc-200 hover:border-zinc-300'}`}
+                >
                   <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Turnierpunkte</p>
                   <p className={`mt-1 text-lg font-bold ${getPointsTextClass(myTeamTotalPoints)}`}>{myTeamTotalPoints} Pkt</p>
-                </div>
-                <div className="rounded-2xl border border-zinc-200 bg-white/85 px-3 py-2.5 shadow-[0_10px_30px_rgba(15,23,42,0.05)] backdrop-blur-[10px]">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Im Kader</p>
-                  <p className="mt-1 text-lg font-bold text-zinc-900">{myTeam.length}</p>
-                </div>
-                <div className="rounded-2xl border border-zinc-200 bg-white/85 px-3 py-2.5 shadow-[0_10px_30px_rgba(15,23,42,0.05)] backdrop-blur-[10px]">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Freie Slots</p>
-                  <p className="mt-1 text-lg font-bold text-zinc-900">{myTeamPlaceholderCount}</p>
-                </div>
+                </button>
               </div>
             </div>
           </div>
@@ -2406,70 +2536,97 @@ const loadAuctions = async () => {
 
           {activeTournamentId ? (
             <ul className="space-y-2">
-              {myTeam.map((player) => {
+              {sortedMyTeamPlayers.map((player) => {
                 const probInfo = getProbabilityIcon(player.appearance_probability);
                 const isWildcard = Boolean(player.is_wildcard);
                 const marketValue = playerMarketValues.get(player.id) || 0;
                 const playerPoints = playerTournamentPoints.get(player.id) || 0;
                 const isActivePlayer = player.appearance_probability !== 'Ausgeschlossen';
+                const playerFlag = countryCodeToFlag(player.country || null);
+                const cardAccentClass = getTournamentAccentClassByMeta(activeTournament?.name, activeTournament?.id);
+                const displayName = getCompactPlayerDisplayName(player);
+                const seedingLabel = player.seeding_status
+                  ? player.seeding_status === 'Top-Seed'
+                    ? `Top-Seed${player.tournament_seed_position ? ` #${player.tournament_seed_position}` : ''}`
+                    : player.seeding_status === 'Gesetzt'
+                      ? `Gesetzt${player.tournament_seed_position ? ` #${player.tournament_seed_position}` : ''}`
+                      : player.seeding_status === 'Main-Draw'
+                        ? `Main-Draw${player.tournament_seed_position ? ` #${player.tournament_seed_position}` : ''}`
+                        : player.seeding_status
+                  : null;
+                const seedingBadgeClass = getSeedingBadgeClass(player.seeding_status);
 
                 return (
                   <li
                     key={player.id}
-                    className="group rounded-2xl border border-[#ececec] bg-white px-3 py-3 shadow-[0_10px_28px_rgba(15,23,42,0.07)] transition-all duration-200 hover:border-zinc-200 hover:shadow-[0_14px_34px_rgba(15,23,42,0.10)]"
+                    className="group relative overflow-hidden rounded-2xl border border-[#ececec] bg-white px-3 py-2.5 shadow-[0_8px_18px_rgba(15,23,42,0.07)] transition-all duration-200 hover:border-zinc-200 hover:shadow-[0_10px_24px_rgba(15,23,42,0.10)]"
                   >
-                    <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center">
+                    <div className={`absolute inset-y-0 left-0 w-1 ${cardAccentClass}`} />
+                    <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2.5 pl-1 sm:items-center">
                       <button
                         onClick={() => openPlayerHistory(player)}
                         className="min-w-0 text-left"
                       >
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2.5">
                           <div className={`rounded-full p-[2px] transition-colors duration-200 ${isActivePlayer ? 'bg-emerald-500' : 'bg-zinc-300'}`}>
                             <img
                               src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                               alt={`${player.first_name} ${player.last_name}`}
-                              className="h-12 w-12 rounded-full bg-zinc-100 object-cover"
+                              className="h-14 w-14 rounded-full bg-zinc-100 object-cover"
                             />
                           </div>
 
                           <div className="min-w-0">
                             <div className="flex items-center gap-1.5">
-                              <p className="truncate text-[15px] leading-tight text-zinc-900">
-                                <span className="font-bold">{player.first_name} {player.last_name}</span>
+                              <p className="truncate text-[16px] leading-tight text-zinc-900">
+                                {playerFlag ? <span className="mr-1.5">{playerFlag}</span> : null}
+                                <span className="font-bold">{displayName}</span>
                               </p>
-                              {isWildcard ? (
+                            </div>
+                            <div className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500">
+                              {shouldShowProbabilityIcon(player.appearance_probability) ? (
+                                <span className={`text-sm ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
+                              ) : null}
+                              {seedingLabel ? (
                                 <span
-                                  className="inline-flex items-center rounded-md bg-emerald-900 px-1.5 py-0.5 text-[10px] font-bold text-emerald-50"
-                                  title="Wildcard"
+                                  className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${seedingBadgeClass}`}
+                                  title="Seeding im Turnier"
                                 >
+                                  {hasPrioritySeedingStar(player.seeding_status) ? (
+                                    <Star className="h-3 w-3 text-amber-300" fill="currentColor" strokeWidth={1.6} />
+                                  ) : null}
+                                  {seedingLabel}
+                                </span>
+                              ) : null}
+                              {isWildcard ? (
+                                <span className={wildcardBadgeClass} title="Wildcard">
                                   WC
                                 </span>
                               ) : null}
-                            </div>
-                            <div className="mt-1 flex items-center gap-2 text-xs text-zinc-500">
-                              <span>#{player.ranking}</span>
-                              <span className={`text-sm ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
-                              <span className="truncate">{probInfo.label}</span>
                             </div>
                           </div>
                         </div>
                       </button>
 
                       <div className="shrink-0 text-right">
-                        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">Punkte</p>
-                        <p className={`text-[24px] font-extrabold leading-none ${getPointsTextClass(playerPoints)}`}>
-                          {playerPoints}
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
+                          {myTeamStatMode === 'market' ? 'Marktpreis' : 'Punkte'}
                         </p>
-                        <p className="mt-1 text-xs font-medium text-zinc-500">{formatCurrency(marketValue)}</p>
-                      </div>
-
-                      <div className="flex items-center justify-end">
+                        {myTeamStatMode === 'market' ? (
+                          <p className={`text-[18px] font-extrabold leading-none text-emerald-800 ${sportyNumberClass}`}>
+                            {formatCurrency(marketValue)}
+                          </p>
+                        ) : (
+                          <p className={`text-[22px] font-extrabold leading-none ${getPointsTextClass(playerPoints)}`}>
+                            {playerPoints}
+                          </p>
+                        )}
                         <button
                           onClick={() => {
                             setPlayerToSell(player);
                             setShowSaleModal(true);
                           }}
-                          className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-orange-200 text-orange-600 transition-colors duration-150 hover:bg-orange-50"
+                          className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-orange-200 text-orange-600 transition-colors duration-150 hover:bg-orange-50"
                           title={`${player.first_name} ${player.last_name} verkaufen`}
                           aria-label={`${player.first_name} ${player.last_name} verkaufen`}
                         >
@@ -2481,29 +2638,7 @@ const loadAuctions = async () => {
                 );
               })}
 
-              {Array.from({ length: myTeamPlaceholderCount }).map((_, index) => (
-                <li key={`empty-myteam-slot-${index}`}>
-                  <button
-                    onClick={() => {
-                      setActiveTab('auctions');
-                      if (activeTournament?.status === 'upcoming') {
-                        setMarketTournamentFilterId(activeTournament.id);
-                      }
-                    }}
-                    className="flex w-full items-center gap-3 rounded-2xl border border-dashed border-zinc-300 bg-white/65 px-3 py-3 text-left shadow-[0_8px_20px_rgba(15,23,42,0.04)] transition-colors duration-150 hover:border-zinc-400 hover:bg-white"
-                  >
-                    <span className="inline-flex h-12 w-12 items-center justify-center rounded-full border border-dashed border-zinc-300 bg-zinc-50 text-zinc-400">
-                      <Plus className="h-5 w-5" strokeWidth={2.25} />
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block text-sm font-semibold text-zinc-800">Spieler kaufen</span>
-                      <span className="block text-xs text-zinc-500">Freier Kaderplatz fuer den naechsten Transfer.</span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-
-              {myTeam.length === 0 && myTeamPlaceholderCount === 0 ? (
+              {myTeam.length === 0 ? (
                 <li className="rounded-2xl border border-zinc-200 bg-white p-5 text-center text-sm text-zinc-500 shadow-sm">
                   Noch keine Spieler im Team vorhanden.
                 </li>
@@ -2521,34 +2656,36 @@ const loadAuctions = async () => {
           {isLineupEditMode && (
             <button
               onClick={closeLineupEditMode}
-              className="fixed top-6 left-6 z-[70] w-10 h-10 rounded-full border border-zinc-300 bg-white text-zinc-700 shadow-md hover:bg-zinc-50"
+              className="fixed right-4 top-[76px] z-[80] inline-flex items-center gap-1.5 rounded-full border border-rose-200/80 bg-gradient-to-r from-rose-500 via-red-500 to-orange-500 px-4 py-2 text-xs font-bold text-white shadow-[0_14px_30px_rgba(244,63,94,0.45)] ring-2 ring-white/70 transition-all duration-200 hover:scale-[1.02] hover:from-rose-600 hover:to-orange-600"
               title="Bearbeitungsmodus verlassen"
               aria-label="Bearbeitungsmodus verlassen"
             >
-              ↩
+              <X className="h-3.5 w-3.5" strokeWidth={2.4} />
+              Verlassen
             </button>
           )}
 
           {!isLineupEditMode && (
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
-              <h2 className="text-xl font-semibold">Turniere &amp; Aufstellung</h2>
-              <div className="flex items-center gap-2">
-                <label className="text-sm text-zinc-600">Turnier</label>
-                <select
-                  value={activeTournamentId}
-                  onChange={(e) => {
-                    setActiveTournamentId(e.target.value);
-                    closeLineupEditMode();
-                    setLineupSlots(createEmptyLineupSlots(TOTAL_LINEUP_SLOT_COUNT));
-                  }}
-                  className="px-3 py-2 rounded-lg border border-zinc-300 bg-white text-sm"
-                >
-                  {tournaments.map((tournament) => (
-                    <option key={tournament.id} value={tournament.id}>
+            <div className="-mx-6 mb-4 border-b border-zinc-200/70 bg-zinc-50/90 px-6 pb-4 pt-3 backdrop-blur-md">
+              <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                {tournaments.map((tournament) => {
+                  const accentClass = getTournamentAccentClassByMeta(tournament.name, tournament.id);
+                  const isSelected = activeTournamentId === tournament.id;
+
+                  return (
+                    <button
+                      key={`tournaments-filter-${tournament.id}`}
+                      onClick={() => {
+                        setActiveTournamentId(tournament.id);
+                        closeLineupEditMode();
+                        setLineupSlots(createEmptyLineupSlots(TOTAL_LINEUP_SLOT_COUNT));
+                      }}
+                      className={`shrink-0 rounded-2xl border px-3.5 py-1.5 text-xs font-semibold transition-all duration-200 active:scale-95 ${isSelected ? `${accentClass} border-transparent text-white shadow-[0_6px_14px_rgba(15,23,42,0.16)]` : 'border-zinc-300 bg-zinc-50 text-zinc-600 hover:border-zinc-400 hover:bg-white hover:text-zinc-900'}`}
+                    >
                       {tournament.name}
-                    </option>
-                  ))}
-                </select>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -2559,92 +2696,9 @@ const loadAuctions = async () => {
             </div>
           ) : (
             <>
-              {(() => {
-                const lineupDeadline = getLineupDeadlineRemaining(activeTournament.start_date);
-                if (isLineupEditMode) return null;
-
-                if (activeTournament.status === 'on-going') {
-                  return (
-                    <div className="mb-4 rounded-xl border border-zinc-200 bg-white px-4 py-3 shadow-sm">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-sm font-semibold text-zinc-900">{activeTournament.name}</span>
-                        <span className="text-xs font-medium text-zinc-600">Live-Modus aktiv, Bearbeitung deaktiviert.</span>
-                      </div>
-                    </div>
-                  );
-                }
-
-                if (activeTournament.status === 'upcoming') {
-                  return (
-                    <div className="mb-4 rounded-xl border border-zinc-200 bg-white px-4 py-3 shadow-sm">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-sm font-semibold text-zinc-900">{activeTournament.name}</span>
-                        <span className={`inline-block text-xs px-2 py-1 rounded-md ${lineupDeadline.urgent ? 'bg-orange-100 text-orange-700 font-semibold' : 'bg-sky-100 text-sky-700'}`}>
-                          Restzeit Aufstellung: {lineupDeadline.label}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                }
-
-                return (
-                  <div className="p-4 bg-white rounded-xl shadow-sm border border-zinc-100 mb-4">
-                    <div className="flex justify-between items-center mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">Ausgewaehltes Turnier: {activeTournament.name}</span>
-                        {activeTournament.status === 'completed' && (
-                          <span className="inline-block text-xs px-2 py-1 rounded-md bg-gray-100 text-gray-700">
-                            Abgeschlossen
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-right">
-                        <span className={`inline-block mt-1 text-xs px-2 py-1 rounded-md ${lineupDeadline.urgent ? 'bg-orange-100 text-orange-700 font-semibold' : 'bg-sky-100 text-sky-700'}`}>
-                          Restzeit Aufstellung: {lineupDeadline.label}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-
-              {isLineupEditMode && notInLineupPlayers.length > 0 && (
-                <div className="mb-4 p-3 sm:p-4 bg-gradient-to-r from-emerald-50 to-teal-50 rounded-2xl border border-emerald-200 shadow-sm">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-emerald-800 mb-2">Noch nicht aufgestellt</p>
-                  <div className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                    {notInLineupPlayers.map((player) => {
-                      const probInfo = getProbabilityIcon(player.appearance_probability);
-                      const isWildcard = Boolean(player.is_wildcard);
-                      return (
-                        <button
-                          key={`pill-${player.id}`}
-                          onClick={() => {
-                            if (slotSelectionSheet) {
-                              applyPlayerToSlot(slotSelectionSheet.slotIndex, player);
-                            }
-                          }}
-                          className="shrink-0 inline-flex items-center gap-2 px-3 py-2 rounded-full border border-emerald-300 bg-white hover:bg-emerald-100 text-emerald-900 transition-colors duration-150 shadow-sm"
-                          title={`${player.first_name} ${player.last_name}`}
-                        >
-                          <img
-                            src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
-                            alt={`${player.first_name} ${player.last_name}`}
-                            className="w-6 h-6 rounded-full object-cover"
-                          />
-                          <span className="text-sm font-semibold truncate">{player.first_name}</span>
-                          {isWildcard && (
-                            <span className="text-xs font-bold bg-emerald-900 text-emerald-50 px-1.5 py-0.5 rounded-md">WC</span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
               <div
                 ref={courtContainerRef}
-                className={`${isLineupLocked ? 'bg-sky-500 border-sky-400' : 'bg-sky-300 border-sky-200'} rounded-2xl p-4 sm:p-6 shadow-md mb-5 border ${!isLineupEditMode && !isLineupLocked ? 'cursor-pointer' : ''}`}
+                className={`${courtSurfaceClass} rounded-2xl p-4 sm:p-6 shadow-md border ${isLineupEditMode ? 'fixed left-3 right-3 top-1/2 z-[60] mb-0 -translate-y-1/2 sm:left-1/2 sm:right-auto sm:w-[min(46rem,calc(100vw-2rem))] sm:-translate-x-1/2' : 'mb-5'} ${!isLineupEditMode && !isLineupLocked ? 'cursor-pointer' : ''}`}
                 onClick={() => {
                   if (!isLineupEditMode && !isLineupLocked) {
                     setIsLineupEditMode(true);
@@ -2652,10 +2706,13 @@ const loadAuctions = async () => {
                 }}
               >
                 {isLineupLocked && (
-                  <div className="mb-3 rounded-lg border border-white/35 bg-[#0f172acc] px-3 py-1.5">
-                    <p className="text-xs font-semibold text-emerald-300">
-                      Gesamtpunkte: {myTeamTotalPoints} Pkt | Rang im Turnier: {myTournamentRank ? `#${myTournamentRank}` : '-'}
-                    </p>
+                  <div className="mb-3 rounded-lg border border-white/20 bg-zinc-900/80 px-3 py-1.5 shadow-[0_4px_16px_rgba(15,23,42,0.32)]">
+                    <div className="flex items-center justify-between gap-3 text-xs font-semibold uppercase tracking-[0.08em] text-white">
+                      <span className="truncate">Gesamtpunkte: <span className="font-extrabold">{myTeamTotalPoints} Pkt</span></span>
+                      <span className="inline-flex shrink-0 items-center rounded-md bg-red-100 px-2 py-1 text-[11px] font-semibold normal-case tracking-normal text-red-700 border border-red-200">
+                        Live
+                      </span>
+                    </div>
                   </div>
                 )}
                 {!isLineupEditMode && !isLineupLocked && (
@@ -2685,6 +2742,7 @@ const loadAuctions = async () => {
                     const roundState = player ? playerRoundStates.get(player.id) : undefined;
                     const roundLabel = roundState?.label || 'R1/R2';
                     const isOut = roundLabel === 'OUT';
+                    const showUpcomingMinimalCard = activeTournament?.status === 'upcoming';
                     const showLivePulse = Boolean(
                       activeTournament?.status === 'on-going'
                       && player
@@ -2721,7 +2779,7 @@ const loadAuctions = async () => {
                             onTouchMove={handleTouchMoveForDrag}
                             onTouchEnd={endTouchDrag}
                             onTouchCancel={handleTouchCancelDrag}
-                            className={`relative w-full rounded-xl border-2 border-emerald-300 bg-white/95 p-2.5 text-center shadow-md transition-all duration-200 ${selectedFromSlot === slotIndex ? 'ring-4 ring-emerald-400 ring-offset-2' : ''} ${showLivePulse ? 'animate-[pulse_4.2s_ease-in-out_infinite] shadow-[0_0_0_1px_rgba(74,222,128,0.14),0_0_6px_rgba(74,222,128,0.1)]' : ''} ${slotValidationClass} ${isLineupEditMode ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer hover:shadow-lg'}`}
+                            className={`relative w-full rounded-2xl border border-white/55 bg-white/30 p-2.5 text-center backdrop-blur-md shadow-[0_12px_26px_rgba(15,23,42,0.22)] transition-all duration-200 ${selectedFromSlot === slotIndex ? 'ring-4 ring-emerald-400/80 ring-offset-2 ring-offset-transparent' : ''} ${slotValidationClass} ${isLineupEditMode ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-[0_14px_28px_rgba(15,23,42,0.26)]'}`}
                             title={formatLineupPlayerName(player)}
                           >
                             {isSlotInvalid && (
@@ -2730,11 +2788,29 @@ const loadAuctions = async () => {
                             <img
                               src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                               alt={`${player.first_name} ${player.last_name}`}
-                              className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-zinc-200'} ${isOut ? 'opacity-60' : ''}`}
+                              className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 border-white/85 shadow-[0_4px_14px_rgba(15,23,42,0.24)] ${highlightActive ? 'ring-2 ring-emerald-300/80' : ''} ${showLivePulse ? 'animate-[pulse_2.8s_ease-in-out_infinite]' : ''} ${isOut ? 'opacity-70' : ''}`}
                             />
-                            <p className="text-xs font-semibold mt-1 truncate">{formatLineupPlayerName(player)}</p>
-                            <p className={`${isLineupLocked ? `mt-1 inline-flex items-center rounded-md px-1.5 py-0.5 text-[14px] leading-none font-extrabold border ${displayedPoints < 0 ? 'bg-red-100 text-red-700 border-red-200' : 'bg-emerald-950 text-lime-300 border-emerald-700'}` : `text-xs font-bold ${getPointsTextClass(displayedPoints)}`}`}>{displayedPoints} Pkt</p>
-                            <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-sky-700'}`}>{roundLabel}</p>
+                            <p className="mt-1.5 truncate text-[13px] font-bold tracking-tight text-zinc-900">{formatLineupPlayerName(player)}</p>
+                            {activeTournament?.status === 'upcoming' && hasPrioritySeedingStar(player.seeding_status) ? (
+                              <span
+                                className="absolute -bottom-3 left-1/2 z-20 inline-flex h-7 w-7 -translate-x-1/2 items-center justify-center rounded-full border border-amber-300 bg-amber-100 text-amber-700 shadow-[0_6px_14px_rgba(120,53,15,0.28)]"
+                                title={player.seeding_status || undefined}
+                              >
+                                <Star className="h-4.5 w-4.5" strokeWidth={2.3} fill="currentColor" />
+                              </span>
+                            ) : null}
+                            {!showUpcomingMinimalCard && (
+                              <>
+                                <div className="mt-1 flex items-center justify-center gap-1.5">
+                                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${roundLabel === 'OUT' ? 'bg-red-100 text-red-700 border border-red-200' : roundLabel === 'QF' ? 'bg-sky-100 text-sky-700 border border-sky-200' : 'bg-white/70 text-zinc-700 border border-white/70'}`}>
+                                    {roundLabel}
+                                  </span>
+                                </div>
+                                <p className="mt-1.5 inline-flex items-center rounded-full border border-emerald-900/50 bg-emerald-900 px-2.5 py-1 text-[11px] font-bold text-white shadow-sm">
+                                  {displayedPoints} Pkt
+                                </p>
+                              </>
+                            )}
                           </button>
                         ) : (
                           <button
@@ -2780,6 +2856,7 @@ const loadAuctions = async () => {
                     const roundState = player ? playerRoundStates.get(player.id) : undefined;
                     const roundLabel = roundState?.label || 'R1/R2';
                     const isOut = roundLabel === 'OUT';
+                    const showUpcomingMinimalCard = activeTournament?.status === 'upcoming';
                     const showLivePulse = Boolean(
                       activeTournament?.status === 'on-going'
                       && player
@@ -2816,7 +2893,7 @@ const loadAuctions = async () => {
                             onTouchMove={handleTouchMoveForDrag}
                             onTouchEnd={endTouchDrag}
                             onTouchCancel={handleTouchCancelDrag}
-                            className={`relative w-full h-full rounded-xl border-2 border-pink-300 bg-white/90 p-2.5 text-center shadow-sm transition-all duration-200 ${selectedFromSlot === slotIndex ? 'ring-4 ring-emerald-400 ring-offset-2' : ''} ${showLivePulse ? 'animate-[pulse_4.2s_ease-in-out_infinite] shadow-[0_0_0_1px_rgba(74,222,128,0.12),0_0_5px_rgba(74,222,128,0.09)]' : ''} ${slotValidationClass} ${isLineupEditMode ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer hover:shadow-md'}`}
+                            className={`relative w-full h-full rounded-xl border-2 border-pink-300 bg-white/90 p-2.5 text-center shadow-sm transition-all duration-200 ${selectedFromSlot === slotIndex ? 'ring-4 ring-emerald-400 ring-offset-2' : ''} ${slotValidationClass} ${isLineupEditMode ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer hover:shadow-md'}`}
                             title={formatLineupPlayerName(player)}
                           >
                             {isSlotInvalid && (
@@ -2825,11 +2902,23 @@ const loadAuctions = async () => {
                             <img
                               src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                               alt={`${player.first_name} ${player.last_name}`}
-                              className={`w-12 h-12 sm:w-14 sm:h-14 rounded-full object-cover mx-auto border-2 ${isSlotInvalid ? 'border-red-400' : highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-pink-200'} ${isOut ? 'opacity-60' : ''}`}
+                              className={`w-12 h-12 sm:w-14 sm:h-14 rounded-full object-cover mx-auto border-2 ${isSlotInvalid ? 'border-red-400' : highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-pink-200'} ${showLivePulse ? 'animate-[pulse_2.8s_ease-in-out_infinite]' : ''} ${isOut ? 'opacity-60' : ''}`}
                             />
                             <p className="text-xs font-semibold mt-1 truncate text-pink-950">{formatLineupPlayerName(player)}</p>
-                            <p className={`${isLineupLocked ? `mt-1 inline-flex items-center rounded-md px-1.5 py-0.5 text-[14px] leading-none font-extrabold border ${displayedPoints < 0 ? 'bg-red-100 text-red-700 border-red-200' : 'bg-emerald-950 text-lime-300 border-emerald-700'}` : `text-xs font-bold ${getPointsTextClass(displayedPoints)}`}`}>{displayedPoints} Pkt</p>
-                            <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-pink-700'}`}>{roundLabel}</p>
+                            {activeTournament?.status === 'upcoming' && hasPrioritySeedingStar(player.seeding_status) ? (
+                              <span
+                                className="absolute -bottom-3 left-1/2 z-20 inline-flex h-7 w-7 -translate-x-1/2 items-center justify-center rounded-full border border-amber-300 bg-amber-100 text-amber-700 shadow-[0_6px_14px_rgba(120,53,15,0.28)]"
+                                title={player.seeding_status || undefined}
+                              >
+                                <Star className="h-4.5 w-4.5" strokeWidth={2.3} fill="currentColor" />
+                              </span>
+                            ) : null}
+                            {!showUpcomingMinimalCard && (
+                              <>
+                                <p className={`${isLineupLocked ? `mt-1 inline-flex items-center rounded-md px-1.5 py-0.5 text-[14px] leading-none font-extrabold border ${displayedPoints < 0 ? 'bg-red-100 text-red-700 border-red-200' : 'bg-emerald-950 text-lime-300 border-emerald-700'}` : `text-xs font-bold ${getPointsTextClass(displayedPoints)}`}`}>{displayedPoints} Pkt</p>
+                                <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-pink-700'}`}>{roundLabel}</p>
+                              </>
+                            )}
                           </button>
                         ) : (
                           <button
@@ -2874,6 +2963,7 @@ const loadAuctions = async () => {
                     {notInLineupPlayers.map((player) => {
                       const probInfo = getProbabilityIcon(player.appearance_probability);
                       const isWildcard = Boolean(player.is_wildcard);
+                      const shouldShowProbability = shouldShowProbabilityIcon(player.appearance_probability);
                       return (
                         <div
                           key={player.id}
@@ -2905,11 +2995,21 @@ const loadAuctions = async () => {
                               >
                                 WC
                               </span>
-                            ) : (
+                            ) : shouldShowProbability ? (
                               <span className={`text-lg ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
-                            )}
+                            ) : null}
                           </div>
-                          <p className="text-xs text-zinc-500 mt-1">#{player.ranking} - {player.country}</p>
+                          <div className="mt-1">
+                            <span
+                              className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-semibold ${getSeedingBadgeClass(player.seeding_status)}`}
+                              title={player.seeding_status || 'Kein Seeding'}
+                            >
+                              <span>{player.seeding_status || 'Kein Seeding'}</span>
+                              {hasPrioritySeedingStar(player.seeding_status) ? (
+                                <Star className="h-3 w-3" strokeWidth={2.2} fill="currentColor" />
+                              ) : null}
+                            </span>
+                          </div>
                         </div>
                       );
                     })}
@@ -2942,8 +3042,8 @@ const loadAuctions = async () => {
                     ) : (
                       <div className="flex gap-2 overflow-x-auto pb-1 touch-pan-x">
                         {notInLineupPlayers.map((player) => {
-                          const probInfo = getProbabilityIcon(player.appearance_probability);
-                          const isWildcard = Boolean(player.is_wildcard);
+                          const seedingLabel = player.seeding_status || 'Kein Seeding';
+                          const seedingIconLabel = getSeedingIconLabel(player.seeding_status);
                           return (
                             <div
                               key={`edit-tray-${player.id}`}
@@ -2959,27 +3059,27 @@ const loadAuctions = async () => {
                               }}
                               className={`min-w-[180px] cursor-grab active:cursor-grabbing p-2.5 rounded-xl border hover:border-emerald-300 bg-zinc-50 ${selectedPlayerId === player.id && selectedFromSlot === null ? 'border-emerald-400 ring-2 ring-emerald-200' : 'border-zinc-200'}`}
                             >
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <img
-                                    src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
-                                    alt={`${player.first_name} ${player.last_name}`}
-                                    className="w-8 h-8 rounded-full object-cover"
-                                  />
-                                  <span className="font-medium text-zinc-900 truncate text-sm">{formatLineupPlayerName(player)}</span>
-                                </div>
-                                {isWildcard ? (
-                                  <span
-                                    className="inline-flex items-center rounded-md bg-emerald-900 px-2 py-0.5 text-xs font-bold text-emerald-50"
-                                    title="Wildcard"
-                                  >
-                                    WC
-                                  </span>
-                                ) : (
-                                  <span className={`text-base ${probInfo.color}`} title={probInfo.label}>{probInfo.icon}</span>
-                                )}
+                              <div className="flex items-center gap-2 min-w-0">
+                                <img
+                                  src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
+                                  alt={`${player.first_name} ${player.last_name}`}
+                                  className="w-8 h-8 rounded-full object-cover"
+                                />
+                                <span className="font-medium text-zinc-900 truncate text-sm">{formatLineupPlayerName(player)}</span>
                               </div>
-                              <p className="text-xs text-zinc-500 mt-1">#{player.ranking} - {player.country}</p>
+                              <div className="mt-1 flex items-center gap-1.5">
+                                <span
+                                  className={`inline-flex h-5 min-w-5 items-center justify-center rounded-md px-1.5 text-[10px] font-bold ${getSeedingBadgeClass(player.seeding_status)}`}
+                                  title={seedingLabel}
+                                >
+                                  {seedingIconLabel || '-'}
+                                </span>
+                                {hasPrioritySeedingStar(player.seeding_status) ? (
+                                  <span className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-amber-300 bg-amber-100 text-amber-700" title="Top-Seeding">
+                                    <Star className="h-3.5 w-3.5" strokeWidth={2.2} fill="currentColor" />
+                                  </span>
+                                ) : null}
+                              </div>
                             </div>
                           );
                         })}
