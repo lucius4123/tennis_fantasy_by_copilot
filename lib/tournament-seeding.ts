@@ -6,6 +6,7 @@ export const SEEDING_STATUS_VALUES = [
   'Gesetzt',
   'Qualifikation - R1',
   'Qualifikation - R2',
+  'Withdrawn',
 ] as const
 
 export type SeedingStatus = typeof SEEDING_STATUS_VALUES[number]

@@ -70,6 +70,7 @@ export async function POST(request: NextRequest) {
       total_points_won = 0,
       winners = 0,
       unforced_errors = 0,
+      sets_won = 0,
     } = body;
 
     if (!player_id || !tournament_name || !opponent_name || !match_result || !match_date) {
@@ -118,6 +119,7 @@ export async function POST(request: NextRequest) {
         total_points_won,
         winners,
         unforced_errors,
+        sets_won,
       })
       .select()
       .single();

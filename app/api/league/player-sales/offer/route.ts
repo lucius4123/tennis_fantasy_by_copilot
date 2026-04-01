@@ -9,11 +9,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const { playerId, leagueId, daysUntilExpiration = 7 } = await request.json();
+  const { playerId, leagueId, tournamentId, daysUntilExpiration = 7 } = await request.json();
 
-  if (!playerId || !leagueId) {
+  if (!playerId || !leagueId || !tournamentId) {
     return NextResponse.json(
-      { error: 'playerId and leagueId are required' },
+      { error: 'playerId, leagueId and tournamentId are required' },
       { status: 400 }
     );
   }
@@ -34,35 +34,35 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check if player belongs to this team
+    // Check if player belongs to this team for this specific tournament
     const { data: teamPlayer, error: tpError } = await supabase
       .from('team_players')
       .select('player_id')
       .eq('team_id', team.id)
       .eq('player_id', playerId)
+      .eq('tournament_id', tournamentId)
       .single();
 
     if (tpError || !teamPlayer) {
       return NextResponse.json(
-        { error: 'Player does not belong to your team' },
+        { error: 'Player does not belong to your team for this tournament' },
         { status: 400 }
       );
     }
 
-    // Get active tournament
-    const { data: activeTournament } = await supabase
+    // Check if the tournament is on-going and the player has matches
+    const { data: tournament } = await supabase
       .from('tournaments')
       .select('id, status')
-      .eq('is_active', true)
+      .eq('id', tournamentId)
       .single();
 
-    // Check if tournament is on-going and player is in a match
-    if (activeTournament?.status === 'on-going') {
+    if (tournament?.status === 'on-going') {
       const { data: playerMatches } = await supabase
         .from('player_matches')
         .select('id')
         .eq('player_id', playerId)
-        .eq('tournament_id', activeTournament.id)
+        .eq('tournament_id', tournamentId)
         .limit(1);
 
       if (playerMatches && playerMatches.length > 0) {
@@ -73,25 +73,23 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Get market value for this player in active tournament
-    let marketValue = 0;
-    if (activeTournament) {
-      const { data: tournamentPlayer } = await supabase
-        .from('tournament_players')
-        .select('market_value')
-        .eq('tournament_id', activeTournament.id)
-        .eq('player_id', playerId)
-        .single();
+    // Get market value for this player in this tournament
+    const { data: tournamentPlayer } = await supabase
+      .from('tournament_players')
+      .select('market_value')
+      .eq('tournament_id', tournamentId)
+      .eq('player_id', playerId)
+      .single();
 
-      marketValue = tournamentPlayer?.market_value || 0;
-    }
+    const marketValue = tournamentPlayer?.market_value || 0;
 
     // Remove player from team first (to avoid trigger violation)
     const { error: removeError } = await supabase
       .from('team_players')
       .delete()
       .eq('team_id', team.id)
-      .eq('player_id', playerId);
+      .eq('player_id', playerId)
+      .eq('tournament_id', tournamentId);
 
     if (removeError) {
       console.error('Player removal error:', removeError);
@@ -110,6 +108,7 @@ export async function POST(request: NextRequest) {
       .insert({
         league_id: leagueId,
         player_id: playerId,
+        tournament_id: tournamentId,
         seller_team_id: team.id,
         can_sell_to_market: true,
         end_time: endTime.toISOString(),
@@ -126,7 +125,7 @@ export async function POST(request: NextRequest) {
     // Versuche den Spieler wiederherzustellen
     await supabase
       .from('team_players')
-      .insert({ team_id: team.id, player_id: playerId });
+      .insert({ team_id: team.id, player_id: playerId, tournament_id: tournamentId });
         } catch (err) {
             console.error('Failed to restore player:', err);
         }
@@ -139,10 +138,11 @@ export async function POST(request: NextRequest) {
         {
           league_id: leagueId,
           player_id: playerId,
+          tournament_id: tournamentId,
           seen_in_cycle: false,
           last_shown_at: new Date().toISOString(),
         },
-        { onConflict: 'league_id,player_id' }
+        { onConflict: 'league_id,player_id,tournament_id' }
       );
 
     return NextResponse.json(

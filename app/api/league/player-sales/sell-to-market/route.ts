@@ -12,11 +12,11 @@ export async function POST(request: NextRequest) {
 
   const supabase = createAdminClient();
 
-  const { playerId, leagueId } = await request.json();
+  const { playerId, leagueId, tournamentId } = await request.json();
 
-  if (!playerId || !leagueId) {
+  if (!playerId || !leagueId || !tournamentId) {
     return NextResponse.json(
-      { error: 'playerId and leagueId are required' },
+      { error: 'playerId, leagueId and tournamentId are required' },
       { status: 400 }
     );
   }
@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
     // Get user's team in this league
     const { data: team, error: teamError } = await supabase
       .from('fantasy_teams')
-      .select('id, budget')
+      .select('id')
       .eq('user_id', user.id)
       .eq('league_id', leagueId)
       .single();
@@ -37,34 +37,35 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check if player belongs to this team
+    // Check if player belongs to this team for this tournament
     const { data: teamPlayer, error: tpError } = await supabase
       .from('team_players')
       .select('player_id')
       .eq('team_id', team.id)
       .eq('player_id', playerId)
+      .eq('tournament_id', tournamentId)
       .single();
 
     if (tpError || !teamPlayer) {
       return NextResponse.json(
-        { error: 'Player does not belong to your team' },
+        { error: 'Player does not belong to your team for this tournament' },
         { status: 400 }
       );
     }
 
-    // Check if player is in current lineup (cannot sell)
-    const { data: activeTournament } = await supabase
+    // Check if the tournament is on-going (cannot sell if player has matches)
+    const { data: tournament } = await supabase
       .from('tournaments')
       .select('id, status')
-      .eq('is_active', true)
+      .eq('id', tournamentId)
       .single();
 
-    if (activeTournament?.status === 'on-going') {
+    if (tournament?.status === 'on-going') {
       const { data: playerMatches } = await supabase
         .from('player_matches')
         .select('id')
         .eq('player_id', playerId)
-        .eq('tournament_id', activeTournament.id)
+        .eq('tournament_id', tournamentId)
         .limit(1);
 
       if (playerMatches && playerMatches.length > 0) {
@@ -75,25 +76,29 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Get market value
-    let marketValue = 100000; // Default fallback value
-    if (activeTournament) {
-      const { data: tournamentPlayer } = await supabase
-        .from('tournament_players')
-        .select('market_value')
-        .eq('tournament_id', activeTournament.id)
-        .eq('player_id', playerId)
-        .single();
+    // Get market value for this player in this tournament
+    const { data: tournamentPlayer } = await supabase
+      .from('tournament_players')
+      .select('market_value')
+      .eq('tournament_id', tournamentId)
+      .eq('player_id', playerId)
+      .single();
 
-      marketValue = tournamentPlayer?.market_value || marketValue;
-    }
+    const marketValue = tournamentPlayer?.market_value || 100000;
 
-    // Update team budget: add the market value
+    // Update per-tournament budget: add the market value
+    const { data: stats } = await supabase
+      .from('fantasy_team_tournament_stats')
+      .select('budget')
+      .eq('team_id', team.id)
+      .eq('tournament_id', tournamentId)
+      .single();
+    const newBudget = Number(stats?.budget ?? 0) + marketValue;
     const { error: budgetError } = await supabase
-      .from('fantasy_teams')
-      .update({ budget: team.budget + marketValue })
-      .eq('id', team.id);
-
+      .from('fantasy_team_tournament_stats')
+      .update({ budget: newBudget })
+      .eq('team_id', team.id)
+      .eq('tournament_id', tournamentId);
     if (budgetError) {
       console.error('Budget update error:', budgetError);
       return NextResponse.json(
@@ -102,12 +107,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Remove player from team
+    // Remove player from team (tournament-scoped)
     const { error: removeError } = await supabase
       .from('team_players')
       .delete()
       .eq('team_id', team.id)
-      .eq('player_id', playerId);
+      .eq('player_id', playerId)
+      .eq('tournament_id', tournamentId);
 
     if (removeError) {
       console.error('Player removal error:', removeError);
@@ -143,17 +149,18 @@ export async function POST(request: NextRequest) {
         {
           league_id: leagueId,
           player_id: playerId,
+          tournament_id: tournamentId,
           seen_in_cycle: false,
           last_shown_at: new Date().toISOString(),
         },
-        { onConflict: 'league_id,player_id' }
+        { onConflict: 'league_id,player_id,tournament_id' }
       );
 
     return NextResponse.json(
       {
         success: true,
         message: `Player sold for ${marketValue.toLocaleString('de-DE')}€`,
-        newBudget: team.budget + marketValue,
+        newBudget: newBudget,
       },
       { status: 200 }
     );

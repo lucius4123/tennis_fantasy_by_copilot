@@ -48,6 +48,7 @@ export async function PATCH(
       'total_points_won',
       'winners',
       'unforced_errors',
+      'sets_won',
     ];
 
     const updatePayload: Record<string, unknown> = {};

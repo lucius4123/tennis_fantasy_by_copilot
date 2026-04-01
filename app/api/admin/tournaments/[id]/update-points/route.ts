@@ -81,6 +81,7 @@ export async function POST(request: NextRequest) {
       points += (match.breaks_conceded || 0) * getRulePoints('breaks_conceded')
       points += (match.winners || 0) * getRulePoints('winners', 'winner')
       points += (match.unforced_errors || 0) * getRulePoints('unforced_errors', 'unforced_error')
+      points += (match.sets_won || 0) * getRulePoints('sets_won', 'set_won')
       points += (match.total_points_won || 0) * getRulePoints('total_points_won')
 
       // Store for batch update
@@ -126,22 +127,64 @@ export async function POST(request: NextRequest) {
     }
 
     // Step 7: Calculate points per team
+    // Teams with a negative tournament budget receive 0 points.
+    const uniqueTeamIds = Array.from(new Set((lineups || []).map((l: { team_id: string }) => l.team_id)))
+    const teamBudgetMap = new Map<string, number>()
+    if (uniqueTeamIds.length > 0) {
+      const { data: budgetRows } = await supabase
+        .from('fantasy_team_tournament_stats')
+        .select('team_id, budget')
+        .eq('tournament_id', tournamentId)
+        .in('team_id', uniqueTeamIds)
+      for (const row of budgetRows || []) {
+        teamBudgetMap.set(row.team_id, Number(row.budget ?? 0))
+      }
+    }
+
     const teamPoints = new Map<string, number>()
     for (const lineup of lineups || []) {
+      const teamBudget = teamBudgetMap.get(lineup.team_id) ?? 0
+      if (teamBudget < 0) {
+        // Team is in debt — no points awarded for this tournament
+        teamPoints.set(lineup.team_id, 0)
+        continue
+      }
       const playerTotalPoints = playerPoints.get(lineup.player_id) || 0
       const points = Number(lineup.slot_index) >= 5 ? Math.max(playerTotalPoints, 0) : playerTotalPoints
       const currentTeamPoints = teamPoints.get(lineup.team_id) || 0
       teamPoints.set(lineup.team_id, currentTeamPoints + points)
     }
 
-    // Step 8: Update fantasy_teams with the accumulated points
+    // Step 8: Update per-tournament points in fantasy_team_tournament_stats,
+    // then recalculate total_points_scored on fantasy_teams as the sum across all tournaments.
     let teamsUpdated = 0
     for (const [teamId, points] of teamPoints.entries()) {
+      // Upsert the tournament-specific points row
+      const { error: statsUpsertError } = await supabase
+        .from('fantasy_team_tournament_stats')
+        .upsert(
+          { team_id: teamId, tournament_id: tournamentId, points_scored: points },
+          { onConflict: 'team_id,tournament_id' }
+        )
+
+      if (statsUpsertError) continue
+
+      // Sum all tournament points for this team to get the new total
+      const { data: allStats } = await supabase
+        .from('fantasy_team_tournament_stats')
+        .select('points_scored')
+        .eq('team_id', teamId)
+
+      const totalPoints = (allStats || []).reduce(
+        (sum: number, row: { points_scored: number }) => sum + (row.points_scored || 0),
+        0
+      )
+
       const { error: teamUpdateError } = await supabase
         .from('fantasy_teams')
-        .update({ total_points_scored: points })
+        .update({ total_points_scored: totalPoints })
         .eq('id', teamId)
-      
+
       if (!teamUpdateError) {
         teamsUpdated++
       }

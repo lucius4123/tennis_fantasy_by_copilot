@@ -7,8 +7,8 @@ import { ArrowLeft, Upload, CheckCircle2, XCircle } from 'lucide-react'
 interface UploadResult {
   success: boolean
   inserted: number
-  skipped: number
-  skippedPlayers: string[]
+  updated: number
+  updatedPlayers: string[]
   message: string
   error?: string
 }
@@ -53,8 +53,8 @@ export default function UploadPlayersPage() {
         setResult({
           success: false,
           inserted: 0,
-          skipped: 0,
-          skippedPlayers: [],
+          updated: 0,
+          updatedPlayers: [],
           message: data.error || 'Upload fehlgeschlagen',
           error: data.details,
         })
@@ -63,8 +63,8 @@ export default function UploadPlayersPage() {
       setResult({
         success: false,
         inserted: 0,
-        skipped: 0,
-        skippedPlayers: [],
+        updated: 0,
+        updatedPlayers: [],
         message: 'Fehler beim Upload',
         error: error instanceof Error ? error.message : 'Unbekannter Fehler',
       })
@@ -86,7 +86,7 @@ export default function UploadPlayersPage() {
           </Link>
           <h1 className="text-3xl font-bold text-gray-900">Spieler Excel-Upload</h1>
           <p className="text-gray-600 mt-2">
-            Lade eine Excel-Datei mit Spielern hoch. Bereits existierende Spieler werden übersprungen.
+            Lade eine Excel-Datei mit Spielern hoch. Bestehende Spieler werden anhand der atp_id aktualisiert, neue Spieler werden hinzugefügt.
           </p>
         </div>
 
@@ -100,19 +100,19 @@ export default function UploadPlayersPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-gray-300">
-                    <th className="text-left py-2 px-3 font-semibold">Rank</th>
-                    <th className="text-left py-2 px-3 font-semibold">Player name</th>
-                    <th className="text-left py-2 px-3 font-semibold">Country</th>
-                    <th className="text-left py-2 px-3 font-semibold">Points</th>
                     <th className="text-left py-2 px-3 font-semibold">atp_id</th>
+                    <th className="text-left py-2 px-3 font-semibold">vorname</th>
+                    <th className="text-left py-2 px-3 font-semibold">nachname</th>
+                    <th className="text-left py-2 px-3 font-semibold">nationalität</th>
+                    <th className="text-left py-2 px-3 font-semibold">ranking</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr>
                     <td className="py-2 px-3 text-gray-600">1</td>
-                    <td className="py-2 px-3 text-gray-600">Alcaraz Carlos</td>
+                    <td className="py-2 px-3 text-gray-600">Carlos</td>
+                    <td className="py-2 px-3 text-gray-600">Alcaraz</td>
                     <td className="py-2 px-3 text-gray-600">Spain</td>
-                    <td className="py-2 px-3 text-gray-600">13550</td>
                     <td className="py-2 px-3 text-gray-600">1</td>
                   </tr>
                 </tbody>
@@ -172,15 +172,15 @@ export default function UploadPlayersPage() {
                   {result.success && (
                     <div className="text-sm space-y-1">
                       <p className="text-green-800">✓ {result.inserted} neue Spieler hinzugefügt</p>
-                      <p className="text-green-800">↷ {result.skipped} Spieler übersprungen (bereits vorhanden)</p>
-                      
-                      {result.skippedPlayers.length > 0 && (
+                      <p className="text-green-800">✎ {result.updated} Spieler aktualisiert</p>
+
+                      {result.updatedPlayers.length > 0 && (
                         <details className="mt-3">
                           <summary className="cursor-pointer text-green-700 hover:text-green-900 font-medium">
-                            Übersprungene Spieler anzeigen
+                            Aktualisierte Spieler anzeigen
                           </summary>
                           <ul className="mt-2 ml-4 space-y-1 text-green-700">
-                            {result.skippedPlayers.map((name, idx) => (
+                            {result.updatedPlayers.map((name, idx) => (
                               <li key={idx} className="list-disc">
                                 {name}
                               </li>

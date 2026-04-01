@@ -38,6 +38,7 @@ CREATE TABLE player_matches (
     total_points_won INT DEFAULT 0,
     winners INT DEFAULT 0,
     unforced_errors INT DEFAULT 0,
+    sets_won INT DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
@@ -61,7 +62,8 @@ INSERT INTO scoring_rules (stat_name, points_per_unit, description) VALUES
     ('net_points_won', 8, 'Punkte pro gewonnenem Netzpunkt'),
     ('breaks_conceded', -8, 'Punkte pro kassiertem Break'),
     ('winner', 5, 'Punkte pro Winner'),
-    ('unforced_error', -3, 'Punkte pro unforced Error');
+    ('unforced_error', -3, 'Punkte pro unforced Error'),
+    ('set_won', 20, 'Punkte pro gewonnenem Satz');
 
 -- RLS for scoring_rules
 ALTER TABLE scoring_rules ENABLE ROW LEVEL SECURITY;
@@ -98,8 +100,9 @@ CREATE TABLE fantasy_teams (
 CREATE TABLE team_players (
     team_id UUID REFERENCES fantasy_teams(id) ON DELETE CASCADE,
     player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+    tournament_id UUID REFERENCES tournaments(id) ON DELETE CASCADE,
     added_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
-    PRIMARY KEY (team_id, player_id)
+    PRIMARY KEY (team_id, player_id, tournament_id)
 );
 
 -- Row Level Security (RLS)
@@ -152,7 +155,6 @@ CREATE POLICY "Service role can manage team_players" ON team_players FOR ALL USI
 
 -- Add columns to fantasy_teams
 ALTER TABLE fantasy_teams ADD COLUMN total_points_scored INT DEFAULT 0;
-ALTER TABLE fantasy_teams ADD COLUMN budget INT DEFAULT 1000000;
 ALTER TABLE fantasy_teams ADD COLUMN profile_image_url TEXT;
 
 -- Table: market_auctions
@@ -160,6 +162,7 @@ CREATE TABLE market_auctions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     league_id UUID REFERENCES leagues(id) ON DELETE CASCADE,
     player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+    tournament_id UUID REFERENCES tournaments(id) ON DELETE CASCADE,
     highest_bidder_id UUID REFERENCES fantasy_teams(id) ON DELETE SET NULL,
     highest_bid INT DEFAULT 0,
     end_time TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -183,13 +186,14 @@ CREATE POLICY "Service role can manage market_auctions" ON market_auctions FOR A
 CREATE TABLE market_player_rotation (
     league_id UUID REFERENCES leagues(id) ON DELETE CASCADE,
     player_id UUID REFERENCES players(id) ON DELETE CASCADE,
+    tournament_id UUID REFERENCES tournaments(id) ON DELETE CASCADE,
     seen_in_cycle BOOLEAN NOT NULL DEFAULT false,
     last_shown_at TIMESTAMP WITH TIME ZONE,
-    PRIMARY KEY (league_id, player_id)
+    PRIMARY KEY (league_id, player_id, tournament_id)
 );
 
-CREATE INDEX idx_market_player_rotation_league_seen
-    ON market_player_rotation (league_id, seen_in_cycle);
+CREATE INDEX idx_market_player_rotation_league_tournament_seen
+    ON market_player_rotation (league_id, tournament_id, seen_in_cycle);
 
 -- RLS for market_player_rotation
 ALTER TABLE market_player_rotation ENABLE ROW LEVEL SECURITY;
@@ -212,6 +216,7 @@ CREATE TABLE tournaments (
     start_budget INT DEFAULT 1000000,
     starter_team_target_value INT DEFAULT 0,
     starter_team_player_count INT DEFAULT 8 CHECK (starter_team_player_count > 0),
+    newcomer_enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
@@ -230,7 +235,7 @@ CREATE TABLE tournament_players (
     player_id UUID REFERENCES players(id) ON DELETE CASCADE,
     appearance_probability TEXT NOT NULL CHECK (appearance_probability IN ('Garantiert', 'Sehr Wahrscheinlich', 'Wahrscheinlich', 'Riskant', 'Sehr Riskant', 'Ausgeschlossen')),
     is_wildcard BOOLEAN NOT NULL DEFAULT false,
-        seeding_status TEXT NOT NULL DEFAULT 'Main-Draw' CHECK (seeding_status IN ('Top-Seed', 'Main-Draw', 'Gesetzt', 'Qualifikation - R1', 'Qualifikation - R2')),
+        seeding_status TEXT NOT NULL DEFAULT 'Main-Draw' CHECK (seeding_status IN ('Top-Seed', 'Main-Draw', 'Gesetzt', 'Qualifikation - R1', 'Qualifikation - R2', 'Withdrawn')),
         tournament_seed_position INT,
         qualification_seed_position INT,
     market_value DECIMAL(10,2) DEFAULT 0,
@@ -297,27 +302,33 @@ CREATE TRIGGER validate_tournament_lineup_slot_before_write
     BEFORE INSERT OR UPDATE ON tournament_lineups
     FOR EACH ROW EXECUTE FUNCTION validate_tournament_lineup_slot();
 
--- Trigger to prevent player from being in both team_players and market_auctions for the same league
+-- Trigger to prevent player from being in both team_players and market_auctions for the same league+tournament
 CREATE OR REPLACE FUNCTION check_player_assignment()
 RETURNS TRIGGER AS $$
 BEGIN
     -- For team_players insert
     IF TG_TABLE_NAME = 'team_players' THEN
         IF EXISTS (
-            SELECT 1 FROM market_auctions ma
+            SELECT 1
+            FROM market_auctions ma
             JOIN fantasy_teams ft ON ft.league_id = ma.league_id
-            WHERE ft.id = NEW.team_id AND ma.player_id = NEW.player_id
+            WHERE ft.id = NEW.team_id
+              AND ma.player_id = NEW.player_id
+              AND ma.tournament_id IS NOT DISTINCT FROM NEW.tournament_id
         ) THEN
-            RAISE EXCEPTION 'Player is already assigned to an auction in this league';
+            RAISE EXCEPTION 'Player is already listed in an auction for this tournament in this league';
         END IF;
     -- For market_auctions insert
     ELSIF TG_TABLE_NAME = 'market_auctions' THEN
         IF EXISTS (
-            SELECT 1 FROM team_players tp
+            SELECT 1
+            FROM team_players tp
             JOIN fantasy_teams ft ON tp.team_id = ft.id
-            WHERE ft.league_id = NEW.league_id AND tp.player_id = NEW.player_id
+            WHERE ft.league_id = NEW.league_id
+              AND tp.player_id = NEW.player_id
+              AND tp.tournament_id IS NOT DISTINCT FROM NEW.tournament_id
         ) THEN
-            RAISE EXCEPTION 'Player is already assigned to a team in this league';
+            RAISE EXCEPTION 'Player is already owned by a team for this tournament in this league';
         END IF;
     END IF;
     RETURN NEW;
@@ -342,6 +353,7 @@ DECLARE
     breaks_conceded_points DECIMAL(10,2);
     winner_points DECIMAL(10,2);
     ue_points DECIMAL(10,2);
+    set_won_points DECIMAL(10,2);
 BEGIN
     -- Get scoring rules
     SELECT COALESCE(points_per_unit, 0) INTO win_points FROM scoring_rules WHERE stat_name = 'win';
@@ -353,6 +365,7 @@ BEGIN
     SELECT COALESCE(points_per_unit, 0) INTO breaks_conceded_points FROM scoring_rules WHERE stat_name = 'breaks_conceded';
     SELECT COALESCE(points_per_unit, 0) INTO winner_points FROM scoring_rules WHERE stat_name = 'winner';
     SELECT COALESCE(points_per_unit, 0) INTO ue_points FROM scoring_rules WHERE stat_name = 'unforced_error';
+    SELECT COALESCE(points_per_unit, 0) INTO set_won_points FROM scoring_rules WHERE stat_name = 'set_won';
     
     -- Calculate base points from win/loss
     IF NEW.match_result ILIKE '%won%' OR NEW.match_result ILIKE '%sieg%' THEN
@@ -369,7 +382,8 @@ BEGIN
         (COALESCE(NEW.net_points_won, 0) * npw_points) +
         (COALESCE(NEW.breaks_conceded, 0) * breaks_conceded_points) +
         (COALESCE(NEW.winners, 0) * winner_points) +
-        (COALESCE(NEW.unforced_errors, 0) * ue_points);
+        (COALESCE(NEW.unforced_errors, 0) * ue_points) +
+        (COALESCE(NEW.sets_won, 0) * set_won_points);
     
     NEW.fantasy_points := ROUND(total_points);
     RETURN NEW;

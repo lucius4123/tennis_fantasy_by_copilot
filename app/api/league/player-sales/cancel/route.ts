@@ -25,7 +25,7 @@ export async function DELETE(request: NextRequest) {
     // Get the auction
     const { data: auction, error: auctionError } = await supabase
       .from('market_auctions')
-      .select('id, league_id, seller_team_id, player_id')
+      .select('id, league_id, seller_team_id, player_id, tournament_id')
       .eq('id', auctionId)
       .single();
 
@@ -58,12 +58,13 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Find all auctions for this player in this league to avoid trigger conflicts.
+    // Find all auctions for this player+tournament in this league to avoid trigger conflicts.
     const { data: relatedAuctions, error: relatedAuctionsError } = await supabase
       .from('market_auctions')
-      .select('id, highest_bidder_id, highest_bid')
+      .select('id, highest_bidder_id, highest_bid, tournament_id')
       .eq('league_id', leagueId)
-      .eq('player_id', auction.player_id);
+      .eq('player_id', auction.player_id)
+      .eq('tournament_id', auction.tournament_id);
 
     if (relatedAuctionsError) {
       console.error('Related auctions query error:', relatedAuctionsError);
@@ -76,31 +77,38 @@ export async function DELETE(request: NextRequest) {
     const auctionsToDelete = relatedAuctions || [];
 
     // Refund highest bids for every related auction that gets removed.
+    const auctionTournamentId: string | null = auction.tournament_id ?? null;
+
     for (const relatedAuction of auctionsToDelete) {
       if (!relatedAuction.highest_bidder_id || Number(relatedAuction.highest_bid || 0) <= 0) {
         continue;
       }
 
-      const { data: bidderTeam } = await supabase
-        .from('fantasy_teams')
-        .select('id, budget')
-        .eq('id', relatedAuction.highest_bidder_id)
-        .single();
+      if (auctionTournamentId) {
+        const { data: bidderStats } = await supabase
+          .from('fantasy_team_tournament_stats')
+          .select('budget')
+          .eq('team_id', relatedAuction.highest_bidder_id)
+          .eq('tournament_id', auctionTournamentId)
+          .single();
 
-      if (bidderTeam) {
-        await supabase
-          .from('fantasy_teams')
-          .update({ budget: Number(bidderTeam.budget || 0) + Number(relatedAuction.highest_bid || 0) })
-          .eq('id', bidderTeam.id);
+        if (bidderStats != null) {
+          await supabase
+            .from('fantasy_team_tournament_stats')
+            .update({ budget: Number(bidderStats.budget || 0) + Number(relatedAuction.highest_bid || 0) })
+            .eq('team_id', relatedAuction.highest_bidder_id)
+            .eq('tournament_id', auctionTournamentId);
+        }
       }
     }
 
-    // Delete every related auction for this player in this league.
+    // Delete every related auction for this player+tournament in this league.
     const { error: deleteError } = await supabase
       .from('market_auctions')
       .delete()
       .eq('league_id', leagueId)
-      .eq('player_id', auction.player_id);
+      .eq('player_id', auction.player_id)
+      .eq('tournament_id', auction.tournament_id);
 
     if (deleteError) {
       console.error('Auction deletion error:', deleteError);
@@ -110,13 +118,14 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Return player to team.
+    // Return player to team (tournament-scoped).
     const { error: insertError } = await supabase
       .from('team_players')
       .upsert({
         team_id: auction.seller_team_id,
         player_id: auction.player_id,
-      }, { onConflict: 'team_id,player_id' });
+        tournament_id: auction.tournament_id,
+      }, { onConflict: 'team_id,player_id,tournament_id' });
 
     if (insertError) {
       console.error('Player reinsertion error:', insertError);

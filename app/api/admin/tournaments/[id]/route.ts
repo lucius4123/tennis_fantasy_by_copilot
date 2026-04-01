@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient as createServerAuthClient } from '@/utils/supabase/server'
-import { createAdminClient, refillTransferMarketForActiveTournament } from '@/lib/transfer-market'
+import { createAdminClient, refillTransferMarketForActiveTournament, initializeTournamentTeamStats, assignInitialTeamLineups } from '@/lib/transfer-market'
 import { findTournamentTypeOption } from '@/lib/tournament-types'
 
 function getAdminClient() {
@@ -30,6 +30,7 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   const countryCodeRaw = body?.country_code as string | null | undefined
   const previousWinnerPlayerIdRaw = body?.previous_winner_player_id as string | null | undefined
   const tournamentTypeRaw = body?.tournament_type as string | null | undefined
+  const newcomerEnabledRaw = body?.newcomer_enabled as boolean | undefined
 
   const updateData: any = {}
   
@@ -96,6 +97,13 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
     updateData.singles_player_count = tournamentTypeOption?.singlesPlayerCount ?? null
   }
 
+  if (newcomerEnabledRaw !== undefined) {
+    if (typeof newcomerEnabledRaw !== 'boolean') {
+      return NextResponse.json({ error: 'newcomer_enabled must be boolean' }, { status: 400 })
+    }
+    updateData.newcomer_enabled = newcomerEnabledRaw
+  }
+
   if (Object.keys(updateData).length === 0) {
     return NextResponse.json({ error: 'No valid fields to update' }, { status: 400 })
   }
@@ -125,8 +133,66 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
       return NextResponse.json({ error: clearRotationError.message, code: clearRotationError.code }, { status: 500 })
     }
 
+    // Initialize per-tournament budget for all teams
+    await initializeTournamentTeamStats(supabase, activatedTournament.id, activatedTournament.start_budget ?? 1000000)
+
+    // Assign starter team players to all teams first, before refilling the market,
+    // to avoid the trigger blocking team_players inserts when a player is already in an auction.
+    let lineupSummary: any = null
+    try {
+      lineupSummary = await assignInitialTeamLineups(
+        supabase,
+        activatedTournament.id,
+        activatedTournament.starter_team_target_value ?? 0,
+        activatedTournament.starter_team_player_count ?? 8
+      )
+    } catch (lineupError: any) {
+      return NextResponse.json({ error: lineupError.message || 'Failed to assign initial team lineups' }, { status: 500 })
+    }
+
     const refillSummary = await refillTransferMarketForActiveTournament(supabase)
-    return NextResponse.json({ tournament: activatedTournament, refillSummary })
+
+    return NextResponse.json({ tournament: activatedTournament, refillSummary, lineupSummary })
+  }
+
+  if (isActive === false) {
+    const { data: deactivatedTournament, error: deactivateError } = await supabase
+      .from('tournaments')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single()
+
+    if (deactivateError) {
+      return NextResponse.json({ error: deactivateError.message, code: deactivateError.code }, { status: 500 })
+    }
+
+    // Fetch auction IDs for this tournament before deleting them,
+    // so we can delete player_sales_history rows that reference them
+    // (player_sales_history.auction_id is ON DELETE SET NULL, not CASCADE)
+    const { data: auctionRows } = await supabase
+      .from('market_auctions')
+      .select('id')
+      .eq('tournament_id', id)
+
+    if (auctionRows && auctionRows.length > 0) {
+      const auctionIds = auctionRows.map((a: { id: string }) => a.id)
+      await supabase.from('player_sales_history').delete().in('auction_id', auctionIds)
+    }
+
+    // Delete market_auctions for this tournament (cascades market_bids)
+    await supabase.from('market_auctions').delete().eq('tournament_id', id)
+
+    // Delete team_players for this tournament
+    await supabase.from('team_players').delete().eq('tournament_id', id)
+
+    // Delete market_player_rotation for this tournament
+    await supabase.from('market_player_rotation').delete().eq('tournament_id', id)
+
+    // Delete fantasy_team_tournament_stats for this tournament
+    await supabase.from('fantasy_team_tournament_stats').delete().eq('tournament_id', id)
+
+    return NextResponse.json({ tournament: deactivatedTournament })
   }
 
   const { data, error } = await supabase

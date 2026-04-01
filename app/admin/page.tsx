@@ -19,6 +19,7 @@ interface Tournament {
   tournament_category: string | null
   singles_player_count: number | null
   tournament_type: string | null
+  newcomer_enabled: boolean
 }
 
 interface SupabaseErrorLike {
@@ -40,7 +41,7 @@ interface TournamentPlayer {
   player_id: string
   appearance_probability: string
   is_wildcard?: boolean
-  seeding_status?: 'Top-Seed' | 'Main-Draw' | 'Gesetzt' | 'Qualifikation - R1' | 'Qualifikation - R2'
+  seeding_status?: 'Top-Seed' | 'Main-Draw' | 'Gesetzt' | 'Qualifikation - R1' | 'Qualifikation - R2' | 'Withdrawn'
   tournament_seed_position?: number | null
   qualification_seed_position?: number | null
   market_value?: number
@@ -67,6 +68,7 @@ interface Match {
   total_points_won: number
   winners: number
   unforced_errors: number
+  sets_won: number
   player?: Player
 }
 
@@ -92,6 +94,7 @@ const seedingStatusOptions = [
   'Gesetzt',
   'Qualifikation - R1',
   'Qualifikation - R2',
+  'Withdrawn',
 ] as const
 
 const probabilityColors: Record<string, string> = {
@@ -123,10 +126,11 @@ const emptyMatchFormData = {
   total_points_won: 0,
   winners: 0,
   unforced_errors: 0,
+  sets_won: 0,
 }
 
 export default function AdminPage() {
-  const [activeTab, setActiveTab] = useState<'tournaments' | 'matches' | 'scoring'>('tournaments')
+  const [activeTab, setActiveTab] = useState<'tournaments' | 'matches' | 'scoring' | 'transfermarkt'>('tournaments')
   
   const [tournaments, setTournaments] = useState<Tournament[]>([])
   const [originalTournaments, setOriginalTournaments] = useState<Tournament[]>([])
@@ -144,6 +148,7 @@ export default function AdminPage() {
   const [newTournamentCountryCode, setNewTournamentCountryCode] = useState('')
   const [newTournamentPreviousWinnerPlayerId, setNewTournamentPreviousWinnerPlayerId] = useState('')
   const [newTournamentType, setNewTournamentType] = useState('')
+  const [newTournamentNewcomerEnabled, setNewTournamentNewcomerEnabled] = useState(true)
   const [playerSearchQuery, setPlayerSearchQuery] = useState('')
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -156,6 +161,17 @@ export default function AdminPage() {
   // Scoring rules state
   const [scoringRules, setScoringRules] = useState<ScoringRule[]>([])
   const [originalScoringRules, setOriginalScoringRules] = useState<ScoringRule[]>([])
+
+  // Transfer market config state
+  const [tmTargetOffers, setTmTargetOffers] = useState(8)
+  const [tmMinHours, setTmMinHours] = useState(3)
+  const [tmMaxHours, setTmMaxHours] = useState(24)
+  const [tmRunning, setTmRunning] = useState(false)
+  const [tmResult, setTmResult] = useState<{ success?: boolean; summary?: any; error?: string } | null>(null)
+
+  // Clear news state
+  const [clearNewsRunning, setClearNewsRunning] = useState(false)
+  const [clearNewsResult, setClearNewsResult] = useState<{ success?: boolean; error?: string } | null>(null)
 
   const formatSupabaseError = (error: SupabaseErrorLike | null) => {
     if (!error) return 'Unbekannter Fehler'
@@ -199,6 +215,7 @@ export default function AdminPage() {
         tournament_category: t.tournament_category || null,
         singles_player_count: t.singles_player_count != null ? Number(t.singles_player_count) : null,
         tournament_type: getTournamentTypeValue(t.tournament_category || null, t.singles_player_count ?? null),
+        newcomer_enabled: t.newcomer_enabled !== false,
       }))
       setTournaments(normalized)
       setOriginalTournaments(normalized)
@@ -277,6 +294,7 @@ export default function AdminPage() {
       tournament_category: findTournamentTypeOption(newTournamentType)?.category ?? null,
       singles_player_count: findTournamentTypeOption(newTournamentType)?.singlesPlayerCount ?? null,
       tournament_type: newTournamentType || null,
+      newcomer_enabled: newTournamentNewcomerEnabled,
     }
 
     setTournaments((prev) => [...prev, tempTournament])
@@ -288,6 +306,7 @@ export default function AdminPage() {
     setNewTournamentCountryCode('')
     setNewTournamentPreviousWinnerPlayerId('')
     setNewTournamentType('')
+    setNewTournamentNewcomerEnabled(true)
     setHasUnsavedChanges(true)
   }
 
@@ -456,6 +475,7 @@ export default function AdminPage() {
               country_code: tournament.country_code,
               previous_winner_player_id: tournament.previous_winner_player_id,
               tournament_type: tournament.tournament_type,
+              newcomer_enabled: tournament.newcomer_enabled,
             }),
         })
         const payload = await response.json()
@@ -483,7 +503,8 @@ export default function AdminPage() {
           original.starter_team_player_count !== t.starter_team_player_count ||
           (original.country_code || null) !== (t.country_code || null) ||
           (original.previous_winner_player_id || null) !== (t.previous_winner_player_id || null) ||
-          (original.tournament_type || null) !== (t.tournament_type || null)
+          (original.tournament_type || null) !== (t.tournament_type || null) ||
+          original.newcomer_enabled !== t.newcomer_enabled
         )
       })
 
@@ -514,6 +535,9 @@ export default function AdminPage() {
         }
         if (original && (original.tournament_type || null) !== (tournament.tournament_type || null)) {
           updatePayload.tournament_type = tournament.tournament_type || null
+        }
+        if (original && original.newcomer_enabled !== tournament.newcomer_enabled) {
+          updatePayload.newcomer_enabled = tournament.newcomer_enabled
         }
 
         const response = await fetch(`/api/admin/tournaments/${tournament.id}`, {
@@ -686,6 +710,7 @@ export default function AdminPage() {
       total_points_won: match.total_points_won || 0,
       winners: match.winners || 0,
       unforced_errors: match.unforced_errors || 0,
+      sets_won: match.sets_won || 0,
     })
   }
 
@@ -910,6 +935,17 @@ export default function AdminPage() {
               <Target className="h-5 w-5 inline mr-2" />
               Punkteverteilung
             </button>
+            <button
+              onClick={() => setActiveTab('transfermarkt')}
+              className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                activeTab === 'transfermarkt'
+                  ? 'border-emerald-500 text-emerald-600'
+                  : 'border-transparent text-zinc-500 hover:text-zinc-700 hover:border-zinc-300'
+              }`}
+            >
+              <RotateCcw className="h-5 w-5 inline mr-2" />
+              Transfermarkt
+            </button>
           </nav>
         </div>
 
@@ -992,6 +1028,15 @@ export default function AdminPage() {
                     </option>
                   ))}
                 </select>
+                <label className="flex items-center justify-between gap-3 rounded-lg border border-zinc-300 px-4 py-2 cursor-pointer hover:bg-zinc-50">
+                  <span className="text-sm font-medium text-zinc-700">Newcomer aktivieren</span>
+                  <input
+                    type="checkbox"
+                    checked={newTournamentNewcomerEnabled}
+                    onChange={(e) => setNewTournamentNewcomerEnabled(e.target.checked)}
+                    className="h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500"
+                  />
+                </label>
                 <button
                   onClick={createTournament}
                   className="w-full bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg font-medium flex items-center justify-center gap-2 transition-colors"
@@ -1185,6 +1230,20 @@ export default function AdminPage() {
                         ))}
                       </select>
                     </div>
+                  </div>
+                  <div className="mt-4">
+                    <label className="flex items-center justify-between gap-3 rounded-lg border border-zinc-300 px-4 py-3 cursor-pointer hover:bg-zinc-50">
+                      <div>
+                        <span className="text-sm font-medium text-zinc-700">Newcomer aktivieren</span>
+                        <p className="text-xs text-zinc-500 mt-0.5">Reserve-Slots im Lineup sind sichtbar und bespielbar</p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={currentSelectedTournament.newcomer_enabled}
+                        onChange={(e) => updateTournamentSettings(currentSelectedTournament.id, { newcomer_enabled: e.target.checked })}
+                        className="h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500"
+                      />
+                    </label>
                   </div>
                   <p className="text-xs text-zinc-500 mt-3">
                     Beim Aktivieren werden nur Transfermarkt-Rotation und laufende Marktangebote zurückgesetzt.
@@ -1500,6 +1559,16 @@ export default function AdminPage() {
                     />
                   </div>
 
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 mb-1">Sätze gewonnen</label>
+                    <input
+                      type="number"
+                      value={matchFormData.sets_won === 0 ? '' : matchFormData.sets_won}
+                      onChange={(e) => setMatchFormData({ ...matchFormData, sets_won: e.target.value === '' ? 0 : parseInt(e.target.value) })}
+                      className="w-full px-4 py-2 border border-zinc-300 rounded-lg"
+                    />
+                  </div>
+
                   <button
                     onClick={createMatch}
                     className="w-full bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg font-medium flex items-center justify-center gap-2 transition-colors"
@@ -1584,6 +1653,7 @@ export default function AdminPage() {
                         <div>Break kassiert: {match.breaks_conceded || 0}</div>
                         <div>Winners: {match.winners}</div>
                         <div>UE: {match.unforced_errors}</div>
+                        <div>Sätze gew.: {match.sets_won || 0}</div>
                       </div>
                     </div>
                   ))}
@@ -1597,6 +1667,131 @@ export default function AdminPage() {
         )}
 
         {/* Scoring Rules Tab */}
+        {activeTab === 'transfermarkt' && (
+          <div className="max-w-2xl mx-auto">
+            <div className="bg-white shadow-sm rounded-2xl border border-zinc-200 p-6 space-y-6">
+              <div>
+                <h2 className="text-lg font-semibold text-zinc-900 mb-1">Transfermarkt konfigurieren</h2>
+                <p className="text-sm text-zinc-500">Einstellungen für die automatische Marktbefüllung. Die Konfiguration gilt nur für den nächsten manuellen Aufruf.</p>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 mb-1">Anzahl aktiver PC-Angebote pro Liga</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={tmTargetOffers}
+                    onChange={(e) => setTmTargetOffers(Math.max(1, parseInt(e.target.value) || 1))}
+                    className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 mb-1">Mindestdauer neuer Angebote (Stunden)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={tmMinHours}
+                      onChange={(e) => setTmMinHours(Math.max(1, parseInt(e.target.value) || 1))}
+                      className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-700 mb-1">Maximaldauer neuer Angebote (Stunden)</label>
+                    <input
+                      type="number"
+                      min={tmMinHours}
+                      value={tmMaxHours}
+                      onChange={(e) => setTmMaxHours(Math.max(tmMinHours, parseInt(e.target.value) || tmMinHours))}
+                      className="w-full px-4 py-2 border border-zinc-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                    />
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={async () => {
+                  setTmRunning(true)
+                  setTmResult(null)
+                  try {
+                    const res = await fetch('/api/admin/maintenance/transfer-market', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        targetActivePcOffers: tmTargetOffers,
+                        auctionDurationMinHours: tmMinHours,
+                        auctionDurationMaxHours: tmMaxHours,
+                      }),
+                    })
+                    const payload = await res.json()
+                    setTmResult(res.ok ? { success: true, summary: payload.summary } : { error: payload.error || 'Fehler' })
+                  } catch (err: any) {
+                    setTmResult({ error: err?.message || 'Netzwerkfehler' })
+                  } finally {
+                    setTmRunning(false)
+                  }
+                }}
+                disabled={tmRunning}
+                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <RotateCcw className={`h-5 w-5 ${tmRunning ? 'animate-spin' : ''}`} />
+                {tmRunning ? 'Läuft...' : 'Transfermarkt jetzt aktualisieren'}
+              </button>
+              {tmResult && (
+                <div className={`rounded-xl p-4 text-sm ${tmResult.success ? 'bg-emerald-50 border border-emerald-200 text-emerald-800' : 'bg-red-50 border border-red-200 text-red-800'}`}>
+                  {tmResult.error ? (
+                    <p><span className="font-semibold">Fehler:</span> {tmResult.error}</p>
+                  ) : (
+                    <div className="space-y-1">
+                      <p className="font-semibold">Erfolgreich abgeschlossen</p>
+                      <p>Ligen verarbeitet: {tmResult.summary?.leaguesProcessed ?? '–'}</p>
+                      <p>Neue Angebote erstellt: {tmResult.summary?.offersCreated ?? '–'}</p>
+                      <p>Aktive Turnierspieler: {tmResult.summary?.activeTournamentPlayers ?? '–'}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* News-Feed leeren */}
+            <div className="bg-white shadow-sm rounded-2xl border border-zinc-200 p-6 space-y-4 mt-6">
+              <div>
+                <h2 className="text-lg font-semibold text-zinc-900 mb-1">News-Feed leeren</h2>
+                <p className="text-sm text-zinc-500">Löscht alle Meldungen aus dem News-Feed aller Ligen.</p>
+              </div>
+              <button
+                onClick={async () => {
+                  setClearNewsRunning(true)
+                  setClearNewsResult(null)
+                  try {
+                    const res = await fetch('/api/admin/maintenance/clear-news', { method: 'POST' })
+                    const payload = await res.json()
+                    setClearNewsResult(res.ok ? { success: true } : { error: payload.error || 'Fehler' })
+                  } catch (err: any) {
+                    setClearNewsResult({ error: err?.message || 'Netzwerkfehler' })
+                  } finally {
+                    setClearNewsRunning(false)
+                  }
+                }}
+                disabled={clearNewsRunning}
+                className="w-full bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-medium flex items-center justify-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Trash2 className={`h-5 w-5 ${clearNewsRunning ? 'animate-pulse' : ''}`} />
+                {clearNewsRunning ? 'Wird gelöscht...' : 'News-Feed jetzt leeren'}
+              </button>
+              {clearNewsResult && (
+                <div className={`rounded-xl p-4 text-sm ${clearNewsResult.success ? 'bg-emerald-50 border border-emerald-200 text-emerald-800' : 'bg-red-50 border border-red-200 text-red-800'}`}>
+                  {clearNewsResult.error ? (
+                    <p><span className="font-semibold">Fehler:</span> {clearNewsResult.error}</p>
+                  ) : (
+                    <p className="font-semibold">News-Feed erfolgreich geleert.</p>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {activeTab === 'scoring' && (
           <div className="max-w-4xl mx-auto">
             <div className="bg-white shadow-sm rounded-2xl border border-zinc-200 p-6">

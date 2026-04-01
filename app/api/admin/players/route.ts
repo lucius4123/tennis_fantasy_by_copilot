@@ -55,34 +55,105 @@ export async function POST(request: Request) {
     const workbook = XLSX.read(arrayBuffer, { type: 'array' })
     const sheetName = workbook.SheetNames[0]
     const sheet = workbook.Sheets[sheetName]
-    const data = XLSX.utils.sheet_to_json(sheet) as Array<{
-      Rank: number
-      'Player name': string
-      Country: string
-      Points: number
-      atp_id: number
-    }>
+    const rawData = XLSX.utils.sheet_to_json(sheet) as Array<Record<string, unknown>>
+
+    // Normalize column names: lowercase and replace umlauts to handle Excel variations
+    const data = rawData.map((row) => {
+      const normalized: Record<string, unknown> = {}
+      for (const key of Object.keys(row)) {
+        const normalizedKey = key
+          .toLowerCase()
+          .replace(/ä/g, 'a')
+          .replace(/ö/g, 'o')
+          .replace(/ü/g, 'u')
+        normalized[normalizedKey] = row[key]
+      }
+      return normalized as {
+        atp_id: number
+        vorname: string
+        nachname: string
+        nationalitat: string
+        ranking: number
+      }
+    })
 
     const supabase = getAdminClient()
     const inserted: any[] = []
-    const skipped: string[] = []
+    const updated: string[] = []
 
     for (const row of data) {
-      const playerName = row['Player name'].trim()
-      const nameParts = playerName.split(' ')
-      const firstName = nameParts[0]
-      const lastName = nameParts.slice(1).join(' ')
+      const atpId = row.atp_id
+      if (!atpId) continue
 
-      // Check if player already exists
+      const playerLabel = [row.vorname, row.nachname].filter(Boolean).join(' ') || String(atpId)
+
+      // Find existing player by atp_id
       const { data: existingPlayer } = await supabase
         .from('players')
-        .select('id')
-        .eq('first_name', firstName)
-        .eq('last_name', lastName)
+        .select('id, first_name, last_name, ranking, country')
+        .eq('atp_id', atpId)
         .single()
 
       if (existingPlayer) {
-        skipped.push(playerName)
+        // Update only non-empty fields that differ from existing values
+        const updateFields: Record<string, string | number> = {}
+
+        if (row.vorname?.trim() && row.vorname.trim() !== existingPlayer.first_name) {
+          updateFields.first_name = row.vorname.trim()
+        }
+        if (row.nachname?.trim() && row.nachname.trim() !== existingPlayer.last_name) {
+          updateFields.last_name = row.nachname.trim()
+        }
+        if (row.nationalitat?.trim() && row.nationalitat.trim() !== existingPlayer.country) {
+          updateFields.country = row.nationalitat.trim()
+        }
+        if (row.ranking != null && row.ranking !== existingPlayer.ranking) {
+          const oldRank = existingPlayer.ranking
+          const newRank = row.ranking
+
+          if (oldRank != null) {
+            if (newRank < oldRank) {
+              // Player moves up: shift players between newRank and oldRank-1 down by 1
+              const { data: affected } = await supabase
+                .from('players')
+                .select('id, ranking')
+                .gte('ranking', newRank)
+                .lt('ranking', oldRank)
+                .neq('id', existingPlayer.id)
+
+              for (const p of affected ?? []) {
+                await supabase.from('players').update({ ranking: (p.ranking as number) + 1 }).eq('id', p.id)
+              }
+            } else {
+              // Player moves down: shift players between oldRank+1 and newRank up by 1
+              const { data: affected } = await supabase
+                .from('players')
+                .select('id, ranking')
+                .gt('ranking', oldRank)
+                .lte('ranking', newRank)
+                .neq('id', existingPlayer.id)
+
+              for (const p of affected ?? []) {
+                await supabase.from('players').update({ ranking: (p.ranking as number) - 1 }).eq('id', p.id)
+              }
+            }
+          }
+
+          updateFields.ranking = newRank
+        }
+
+        if (Object.keys(updateFields).length > 0) {
+          const { error } = await supabase
+            .from('players')
+            .update(updateFields)
+            .eq('id', existingPlayer.id)
+
+          if (error) {
+            console.error(`Error updating player ${playerLabel}:`, error)
+          } else {
+            updated.push(playerLabel)
+          }
+        }
         continue
       }
 
@@ -90,18 +161,17 @@ export async function POST(request: Request) {
       const { data: newPlayer, error } = await supabase
         .from('players')
         .insert({
-          atp_id: row.atp_id,
-          first_name: firstName,
-          last_name: lastName,
-          ranking: row.Rank,
-          points: row.Points,
-          country: row.Country
+          atp_id: atpId,
+          first_name: row.vorname?.trim() || null,
+          last_name: row.nachname?.trim() || null,
+          ranking: row.ranking || null,
+          country: row.nationalitat?.trim() || null,
         })
         .select()
         .single()
 
       if (error) {
-        console.error(`Error inserting player ${playerName}:`, error)
+        console.error(`Error inserting player ${playerLabel}:`, error)
       } else {
         inserted.push(newPlayer)
       }
@@ -110,9 +180,9 @@ export async function POST(request: Request) {
     return NextResponse.json({
       success: true,
       inserted: inserted.length,
-      skipped: skipped.length,
-      skippedPlayers: skipped,
-      message: `${inserted.length} Spieler hinzugefügt, ${skipped.length} übersprungen`
+      updated: updated.length,
+      updatedPlayers: updated,
+      message: `${inserted.length} Spieler hinzugefügt, ${updated.length} aktualisiert`
     })
   } catch (error) {
     console.error('Error processing Excel file:', error)

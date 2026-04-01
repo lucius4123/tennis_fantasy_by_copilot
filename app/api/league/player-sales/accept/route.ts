@@ -29,7 +29,7 @@ export async function POST(request: Request) {
 
     const { data: sellerTeam, error: sellerTeamError } = await supabase
       .from('fantasy_teams')
-      .select('id, budget, name')
+      .select('id, name')
       .eq('league_id', leagueId)
       .eq('user_id', user.id)
       .single()
@@ -38,9 +38,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Team not found in league' }, { status: 404 })
     }
 
+    // Get the active tournament for per-tournament budget operations
+    const { data: activeTournament } = await supabase
+      .from('tournaments')
+      .select('id, start_budget')
+      .eq('is_active', true)
+      .single()
+
     const { data: auction, error: auctionError } = await supabase
       .from('market_auctions')
-      .select('id, league_id, player_id, seller_team_id, end_time')
+      .select('id, league_id, player_id, seller_team_id, end_time, tournament_id')
       .eq('id', auctionId)
       .eq('league_id', leagueId)
       .single()
@@ -52,6 +59,8 @@ export async function POST(request: Request) {
     if (!auction.seller_team_id || auction.seller_team_id !== sellerTeam.id) {
       return NextResponse.json({ error: 'Du kannst nur deine eigenen Angebote annehmen' }, { status: 403 })
     }
+
+    const auctionTournamentId: string | null = auction.tournament_id ?? null
 
     const nowIso = new Date().toISOString()
     if (auction.end_time <= nowIso) {
@@ -89,7 +98,7 @@ export async function POST(request: Request) {
 
     const { data: winnerTeam, error: winnerTeamError } = await supabase
       .from('fantasy_teams')
-      .select('id, budget, name')
+      .select('id, name')
       .eq('id', winnerTeamId)
       .single()
 
@@ -97,7 +106,22 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Bietendes Team nicht gefunden' }, { status: 404 })
     }
 
-    if (Number(winnerTeam.budget || 0) < winningAmount) {
+    // Check winner's tournament budget (allow overdraft up to 1/3 of start_budget)
+    let winnerTournamentBudget = 0
+    if (auctionTournamentId) {
+      const { data: winnerStats } = await supabase
+        .from('fantasy_team_tournament_stats')
+        .select('budget')
+        .eq('team_id', winnerTeamId)
+        .eq('tournament_id', auctionTournamentId)
+        .single()
+      winnerTournamentBudget = Number(winnerStats?.budget ?? 0)
+    }
+
+    const maxOverdraft = Math.floor(Number(activeTournament?.start_budget ?? 0) / 3)
+    const effectiveBudget = winnerTournamentBudget + maxOverdraft
+
+    if (effectiveBudget < winningAmount) {
       return NextResponse.json({ error: 'Das bietende Team hat nicht mehr genug Budget' }, { status: 400 })
     }
 
@@ -115,23 +139,34 @@ export async function POST(request: Request) {
     const { error: assignError } = await supabase
       .from('team_players')
       .upsert(
-        { team_id: winnerTeamId, player_id: auction.player_id },
-        { onConflict: 'team_id,player_id', ignoreDuplicates: true }
+        { team_id: winnerTeamId, player_id: auction.player_id, tournament_id: auction.tournament_id },
+        { onConflict: 'team_id,player_id,tournament_id', ignoreDuplicates: true }
       )
 
     if (assignError) {
       return NextResponse.json({ error: 'Failed to transfer player' }, { status: 500 })
     }
 
-    await supabase
-      .from('fantasy_teams')
-      .update({ budget: Math.max(0, Number(winnerTeam.budget || 0) - winningAmount) })
-      .eq('id', winnerTeamId)
+    if (auctionTournamentId) {
+      await supabase
+        .from('fantasy_team_tournament_stats')
+        .update({ budget: winnerTournamentBudget - winningAmount })
+        .eq('team_id', winnerTeamId)
+        .eq('tournament_id', auctionTournamentId)
 
-    await supabase
-      .from('fantasy_teams')
-      .update({ budget: Number(sellerTeam.budget || 0) + winningAmount })
-      .eq('id', sellerTeam.id)
+      const { data: sellerStats } = await supabase
+        .from('fantasy_team_tournament_stats')
+        .select('budget')
+        .eq('team_id', sellerTeam.id)
+        .eq('tournament_id', auctionTournamentId)
+        .single()
+      const sellerCurrentBudget = Number(sellerStats?.budget ?? 0)
+      await supabase
+        .from('fantasy_team_tournament_stats')
+        .update({ budget: sellerCurrentBudget + winningAmount })
+        .eq('team_id', sellerTeam.id)
+        .eq('tournament_id', auctionTournamentId)
+    }
 
     const { error: historyError } = await supabase
       .from('player_sales_history')

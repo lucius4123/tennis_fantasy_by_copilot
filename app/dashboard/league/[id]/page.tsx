@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { ArrowUpRight, Bot, ChevronDown, Clock3, Coins, Plus, Send, Star, X } from 'lucide-react';
+import { AlertTriangle, ArrowUpRight, Bot, ChevronDown, Clock3, Coins, Plus, Send, Star, X } from 'lucide-react';
 import { createClient } from '@/utils/supabase/client';
 import { useParams } from 'next/navigation';
 
@@ -64,6 +64,7 @@ interface PlayerMatch {
   breaks_conceded: number;
   winners: number;
   unforced_errors: number;
+  sets_won: number;
 }
 
 interface Tournament {
@@ -73,6 +74,8 @@ interface Tournament {
   is_active?: boolean;
   status?: 'upcoming' | 'on-going' | 'completed';
   country_code?: string | null;
+  newcomer_enabled?: boolean;
+  start_budget?: number;
 }
 
 interface LeagueNews {
@@ -82,6 +85,8 @@ interface LeagueNews {
   created_at: string;
   team_id?: string | null;
   team_image_url?: string | null;
+  tournament_id?: string | null;
+  tournament_name?: string | null;
 }
 
 interface PlayerSalesHistoryEntry {
@@ -288,11 +293,19 @@ const getSeedingBadgeClass = (seedingStatus?: string | null) => {
   if (seedingStatus === 'Gesetzt') return 'bg-slate-700 text-slate-50 border border-slate-500';
   if (seedingStatus === 'Main-Draw') return 'bg-teal-700 text-teal-50 border border-teal-500';
   if (seedingStatus.startsWith('Qualifikation')) return 'bg-zinc-200 text-zinc-700 border border-zinc-300';
+  if (seedingStatus === 'Withdrawn') return 'bg-red-900/90 text-red-50 border border-red-700';
   return 'bg-zinc-700 text-zinc-50 border border-zinc-600';
 };
 
 const hasPrioritySeedingStar = (seedingStatus?: string | null) => {
   return seedingStatus === 'Top-Seed' || seedingStatus === 'Gesetzt' || seedingStatus === 'Main-Draw';
+};
+
+const getSeedingStarClass = (seedingStatus?: string | null) => {
+  if (seedingStatus === 'Top-Seed') return 'border-violet-300 bg-violet-100 text-violet-500';
+  if (seedingStatus === 'Gesetzt') return 'border-slate-300 bg-slate-100 text-slate-500';
+  if (seedingStatus === 'Main-Draw') return 'border-teal-300 bg-teal-100 text-teal-500';
+  return 'border-zinc-300 bg-zinc-100 text-zinc-500';
 };
 
 const getSeedingIconLabel = (seedingStatus?: string | null) => {
@@ -301,6 +314,7 @@ const getSeedingIconLabel = (seedingStatus?: string | null) => {
   if (seedingStatus === 'Gesetzt') return 'S';
   if (seedingStatus === 'Main-Draw') return 'MD';
   if (seedingStatus.startsWith('Qualifikation')) return 'Q';
+  if (seedingStatus === 'Withdrawn') return 'W';
   return 'S';
 };
 
@@ -329,8 +343,10 @@ export default function LeaguePage() {
   const [playerTournamentPoints, setPlayerTournamentPoints] = useState<Map<string, number>>(new Map());
   const [playerRoundStates, setPlayerRoundStates] = useState<Map<string, PlayerRoundState>>(new Map());
   const [myBudget, setMyBudget] = useState<number | null>(null);
+  const [tournamentBudgets, setTournamentBudgets] = useState<Map<string, number>>(new Map());
   const [teamInspection, setTeamInspection] = useState<TeamInspection | null>(null);
   const [teamInspectionLoading, setTeamInspectionLoading] = useState(false);
+  const [teamInspectionTournamentId, setTeamInspectionTournamentId] = useState<string>('');
   const [playerToSell, setPlayerToSell] = useState<Player | null>(null);
   const [showSaleModal, setShowSaleModal] = useState(false);
   const [sellLoading, setSellLoading] = useState(false);
@@ -346,6 +362,8 @@ export default function LeaguePage() {
   const [slotSelectionSheet, setSlotSelectionSheet] = useState<{ slotIndex: number } | null>(null);
   const [lineupHasChanges, setLineupHasChanges] = useState(false);
   const [collapsedAuctionGroups, setCollapsedAuctionGroups] = useState<Set<string>>(new Set());
+  const [leaderboardFilterTournamentId, setLeaderboardFilterTournamentId] = useState<string>('all');
+  const [allTeamTournamentStats, setAllTeamTournamentStats] = useState<Map<string, Map<string, number>>>(new Map());
   const lineupEditorScrollRef = useRef<HTMLDivElement | null>(null);
   const courtContainerRef = useRef<HTMLDivElement | null>(null);
   const touchDragTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -396,9 +414,34 @@ export default function LeaguePage() {
     [myTeam, playerMarketValues]
   );
 
-  const getAuctionDisplayFirstName = (auction: Auction) => auction.player.last_name;
+  // Projected budget per tournament: current budget - my bids (on others) + highest incoming bid on my own auctions
+  const projectedBudgetByTournament = useMemo(() => {
+    const projection = new Map<string, number>();
+    for (const auction of auctions) {
+      const tid = auction.tournament_id;
+      if (!tid) continue;
+      const current = tournamentBudgets.get(tid);
+      if (current === undefined) continue;
+      const base = projection.has(tid) ? (projection.get(tid) as number) : current;
+      if (auction.seller_team_id === myTeamId) {
+        // Own auction: best payout is the higher of the system offer (market value) or the highest manager bid
+        const highestManagerBid = (auction.incoming_bids || [])[0]?.bid_amount ?? 0;
+        const systemOffer = auction.market_value || 0;
+        const bestPayout = Math.max(systemOffer, highestManagerBid);
+        if (bestPayout > 0) {
+          projection.set(tid, base + bestPayout);
+        }
+      } else if (auction.my_bid && auction.my_bid > 0) {
+        // Bid placed on someone else's auction: deduct my bid
+        projection.set(tid, base - auction.my_bid);
+      }
+    }
+    return projection;
+  }, [auctions, tournamentBudgets, myTeamId]);
 
-  const getAuctionDisplayLastName = (auction: Auction) => auction.player.first_name;
+  const getAuctionDisplayFirstName = (auction: Auction) => auction.player.first_name;
+
+  const getAuctionDisplayLastName = (auction: Auction) => auction.player.last_name;
 
   const shouldShowProbabilityIcon = (probability?: string) => {
     return Boolean(probability && probability !== 'Garantiert');
@@ -434,7 +477,7 @@ export default function LeaguePage() {
     }
   };
 
-  const formatLineupPlayerName = (player: Pick<Player, 'first_name'>) => player.first_name;
+  const formatLineupPlayerName = (player: Pick<Player, 'last_name'>) => player.last_name;
   const isReserveSlot = (slotIndex: number) => slotIndex >= RESERVE_SLOT_START_INDEX;
   const isReserveEligiblePlayer = (player: Player | null) => !player || player.ranking > RESERVE_ELIGIBLE_RANKING_THRESHOLD;
   const getReserveValidationError = (slots: LineupSlot[]) => {
@@ -495,13 +538,13 @@ export default function LeaguePage() {
       if (user) {
         const { data: team, error } = await supabase
           .from('fantasy_teams')
-          .select('id, budget')
+          .select('id')
           .eq('user_id', user.id)
           .eq('league_id', leagueId)
           .single();
         console.log('Team query result:', team, 'error:', error);
         setMyTeamId(team?.id || '');
-        if (team?.budget != null) setMyBudget(team.budget);
+        // Budget is loaded per-tournament once activeTournamentId is known (see effect below)
       }
     };
     getUser();
@@ -521,12 +564,43 @@ export default function LeaguePage() {
       if (myTeamId) {
         (async () => {
           const teamPlayers = await loadMyTeam();
-          await loadCurrentLineup(new Set(teamPlayers.map((player) => player.id)));
+          await loadCurrentLineup(new Set(teamPlayers.map((player) => player.id)), teamPlayers);
         })();
         loadNews();
       }
     }
   }, [user, leagueId, myTeamId, activeTournamentId]);
+
+  // Load per-tournament budgets for all tournaments whenever team changes
+  useEffect(() => {
+    if (!myTeamId) {
+      setTournamentBudgets(new Map());
+      setMyBudget(null);
+      return;
+    }
+    supabase
+      .from('fantasy_team_tournament_stats')
+      .select('tournament_id, budget')
+      .eq('team_id', myTeamId)
+      .then(({ data }) => {
+        const map = new Map<string, number>();
+        for (const row of data || []) {
+          map.set(row.tournament_id, row.budget ?? 0);
+        }
+        setTournamentBudgets(map);
+      });
+  }, [myTeamId]);
+
+  // Keep myBudget in sync with the active tournament
+  useEffect(() => {
+    if (!activeTournamentId) {
+      setMyBudget(null);
+      return;
+    }
+    if (tournamentBudgets.size > 0) {
+      setMyBudget(tournamentBudgets.get(activeTournamentId) ?? 0);
+    }
+  }, [activeTournamentId, tournamentBudgets]);
 
   useEffect(() => {
     if (!user) return;
@@ -538,6 +612,14 @@ export default function LeaguePage() {
     const selectedTournament = tournaments.find((t) => t.id === activeTournamentId) || null;
     setActiveTournament(selectedTournament);
   }, [tournaments, activeTournamentId]);
+
+  useEffect(() => {
+    if (activeTournament?.status === 'upcoming') {
+      setMyTeamStatMode('market');
+    } else if (activeTournament?.status === 'on-going' || activeTournament?.status === 'completed') {
+      setMyTeamStatMode('points');
+    }
+  }, [activeTournament?.id]);
 
   useEffect(() => {
     if (marketTournamentFilterId === 'all') return;
@@ -688,10 +770,26 @@ export default function LeaguePage() {
       .select('id, name, total_points_scored, user_id, profile_image_url')
       .eq('league_id', leagueId)
       .order('total_points_scored', { ascending: false });
-    setLeaderboard(data || []);
+    const teams = data || [];
+    setLeaderboard(teams);
+
+    // Load per-tournament points for all teams in the league
+    if (teams.length > 0) {
+      const teamIds = teams.map((t) => t.id);
+      const { data: statsData } = await supabase
+        .from('fantasy_team_tournament_stats')
+        .select('team_id, tournament_id, points_scored')
+        .in('team_id', teamIds);
+      const statsMap = new Map<string, Map<string, number>>();
+      for (const row of statsData || []) {
+        if (!statsMap.has(row.tournament_id)) statsMap.set(row.tournament_id, new Map());
+        statsMap.get(row.tournament_id)!.set(row.team_id, row.points_scored ?? 0);
+      }
+      setAllTeamTournamentStats(statsMap);
+    }
   };
 
-  const loadCurrentLineup = async (allowedPlayerIds?: Set<string>) => {
+  const loadCurrentLineup = async (allowedPlayerIds?: Set<string>, freshTeamPlayers?: Player[]) => {
     if (!myTeamId || !activeTournamentId) return;
 
     const { data } = await supabase
@@ -702,7 +800,7 @@ export default function LeaguePage() {
       .order('slot_index', { ascending: true });
 
     const nextSlots = createEmptyLineupSlots(TOTAL_LINEUP_SLOT_COUNT);
-    const playerDetailsById = new Map(myTeam.map((player) => [player.id, player]));
+    const playerDetailsById = new Map((freshTeamPlayers ?? myTeam).map((player) => [player.id, player]));
     for (const entry of data || []) {
       const player = Array.isArray((entry as any).player) ? (entry as any).player[0] : (entry as any).player;
       const slotIndex = Number((entry as any).slot_index);
@@ -805,7 +903,8 @@ const loadAuctions = async () => {
       highest_bid,
       highest_bidder_id,
       seller_team_id,
-      end_time, 
+      end_time,
+      tournament_id,
       player:players(first_name, last_name, ranking, country, image_url)
     `)
     .eq('league_id', leagueId)
@@ -924,19 +1023,36 @@ const loadAuctions = async () => {
       ? new Set(eligibleProbabilities.map((entry: any) => entry.player_id as string))
       : new Set(eligibleProbabilities.map((entry: any) => entry.player_id as string));
 
-    const formattedData = data.map((auction: any) => ({
-      ...auction,
-      player: Array.isArray(auction.player) ? auction.player[0] : auction.player,
-      appearance_probability: probabilityMap.get(auction.player_id)?.appearance_probability,
-      is_wildcard: probabilityMap.get(auction.player_id)?.is_wildcard,
-      market_value: probabilityMap.get(auction.player_id)?.market_value || 0,
-      tournament_id: probabilityMap.get(auction.player_id)?.tournament_id || null,
-      tournament_name: probabilityMap.get(auction.player_id)?.tournament_name || null,
-      tournament_country_code: probabilityMap.get(auction.player_id)?.tournament_country_code || null,
-      seeding_status: probabilityMap.get(auction.player_id)?.seeding_status || null,
-      tournament_seed_position: probabilityMap.get(auction.player_id)?.tournament_seed_position ?? null,
-    }))
+    const formattedData = data.map((auction: any) => {
+      // Use the auction's own tournament_id as the canonical key for grouping.
+      // Look up probability metadata only for that specific tournament.
+      const auctionTournamentId: string | null = auction.tournament_id ?? null;
+      const tournamentEntry = auctionTournamentId
+        ? eligibleProbabilities.find(
+            (p: any) => p.player_id === auction.player_id && p.tournament_id === auctionTournamentId
+          ) ?? null
+        : null;
+      const tournamentMeta = tournamentEntry
+        ? (Array.isArray(tournamentEntry.tournament) ? tournamentEntry.tournament[0] : tournamentEntry.tournament)
+        : null;
+
+      return {
+        ...auction,
+        player: Array.isArray(auction.player) ? auction.player[0] : auction.player,
+        appearance_probability: tournamentEntry?.appearance_probability ?? probabilityMap.get(auction.player_id)?.appearance_probability,
+        is_wildcard: tournamentEntry ? Boolean(tournamentEntry.is_wildcard) : probabilityMap.get(auction.player_id)?.is_wildcard,
+        market_value: tournamentEntry?.market_value ?? probabilityMap.get(auction.player_id)?.market_value ?? 0,
+        tournament_id: auctionTournamentId,
+        tournament_name: tournamentMeta?.name ?? probabilityMap.get(auction.player_id)?.tournament_name ?? null,
+        tournament_country_code: tournamentMeta?.country_code ?? probabilityMap.get(auction.player_id)?.tournament_country_code ?? null,
+        seeding_status: tournamentEntry?.seeding_status ?? probabilityMap.get(auction.player_id)?.seeding_status ?? null,
+        tournament_seed_position: tournamentEntry?.tournament_seed_position ?? probabilityMap.get(auction.player_id)?.tournament_seed_position ?? null,
+      };
+    })
       .filter((auction: any) => {
+        if (selectedTournamentFilter) {
+          return auction.tournament_id === selectedTournamentFilter;
+        }
         return allowedPlayerIds.has(auction.player_id);
       });
 
@@ -1071,6 +1187,7 @@ const loadAuctions = async () => {
     const teamIds = Array.from(new Set([...salesTeamIds, ...baseNewsTeamIds]));
 
     let playerNameById = new Map<string, string>();
+    let playerSaleTournamentMap = new Map<string, { tournament_id: string; tournament_name: string }>();
     if (playerIds.length > 0) {
       const { data: players } = await supabase
         .from('players')
@@ -1080,6 +1197,26 @@ const loadAuctions = async () => {
       playerNameById = new Map(
         (players || []).map((player: any) => [player.id, `${player.first_name} ${player.last_name}`])
       );
+
+      const { data: tpData } = await supabase
+        .from('tournament_players')
+        .select('player_id, tournament_id, tournament:tournaments(id, name, start_date)')
+        .in('player_id', playerIds);
+
+      const tournamentsByPlayer = new Map<string, Array<{ tournament_id: string; tournament_name: string; start_date: string }>>();
+      for (const tp of tpData || []) {
+        const tournament = Array.isArray((tp as any).tournament) ? (tp as any).tournament[0] : (tp as any).tournament;
+        if (!tournament) continue;
+        const list = tournamentsByPlayer.get(tp.player_id) || [];
+        list.push({ tournament_id: tp.tournament_id, tournament_name: tournament.name, start_date: tournament.start_date });
+        tournamentsByPlayer.set(tp.player_id, list);
+      }
+      for (const [playerId, playerTournaments] of tournamentsByPlayer.entries()) {
+        const sorted = [...playerTournaments].sort(
+          (a, b) => new Date(b.start_date).getTime() - new Date(a.start_date).getTime()
+        );
+        playerSaleTournamentMap.set(playerId, { tournament_id: sorted[0].tournament_id, tournament_name: sorted[0].tournament_name });
+      }
     }
 
     let teamNameById = new Map<string, string>();
@@ -1105,6 +1242,8 @@ const loadAuctions = async () => {
         const sellerImage = row.seller_team_id ? (teamImageById.get(row.seller_team_id) || null) : null;
         const buyerImage = row.buyer_team_id ? (teamImageById.get(row.buyer_team_id) || null) : null;
 
+        const saleTournamentInfo = playerSaleTournamentMap.get(row.player_id);
+
         if (row.sale_type === 'market_sale') {
           return {
             id: `sale-${row.id}`,
@@ -1113,6 +1252,8 @@ const loadAuctions = async () => {
             created_at: row.created_at,
             team_id: row.seller_team_id,
             team_image_url: sellerImage,
+            tournament_id: saleTournamentInfo?.tournament_id || null,
+            tournament_name: saleTournamentInfo?.tournament_name || null,
           };
         }
 
@@ -1124,6 +1265,8 @@ const loadAuctions = async () => {
             created_at: row.created_at,
             team_id: row.buyer_team_id,
             team_image_url: buyerImage,
+            tournament_id: saleTournamentInfo?.tournament_id || null,
+            tournament_name: saleTournamentInfo?.tournament_name || null,
           };
         }
 
@@ -1134,6 +1277,8 @@ const loadAuctions = async () => {
           created_at: row.created_at,
           team_id: row.seller_team_id,
           team_image_url: sellerImage,
+          tournament_id: saleTournamentInfo?.tournament_id || null,
+          tournament_name: saleTournamentInfo?.tournament_name || null,
         };
       });
 
@@ -1190,10 +1335,15 @@ const loadAuctions = async () => {
   const loadTeamPlayers = async (teamId: string, tournamentId?: string) => {
     if (!teamId) return [] as Player[];
 
+    const selectedTournamentId = tournamentId || activeTournamentId;
+
+    if (!selectedTournamentId) return [] as Player[];
+
     const { data: teamPlayers, error: teamPlayersError } = await supabase
       .from('team_players')
       .select('player_id')
-      .eq('team_id', teamId);
+      .eq('team_id', teamId)
+      .eq('tournament_id', selectedTournamentId ?? '');
 
     if (teamPlayersError || !teamPlayers || teamPlayers.length === 0) {
       if (teamPlayersError) {
@@ -1221,7 +1371,6 @@ const loadAuctions = async () => {
       seeding_status?: string | null;
       tournament_seed_position?: number | null;
     }>();
-    const selectedTournamentId = tournamentId || activeTournamentId;
 
     if (selectedTournamentId) {
       const { data: probabilities, error: probabilitiesError } = await supabase
@@ -1291,7 +1440,7 @@ const loadAuctions = async () => {
       const response = await fetch('/api/league/player-sales/offer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ playerId: player.id, leagueId, daysUntilExpiration: 7 }),
+        body: JSON.stringify({ playerId: player.id, leagueId, tournamentId: activeTournamentId, daysUntilExpiration: 7 }),
       });
 
       const payload = await response.json();
@@ -1321,7 +1470,7 @@ const loadAuctions = async () => {
       const response = await fetch('/api/league/player-sales/sell-to-market', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ playerId: player.id, leagueId }),
+        body: JSON.stringify({ playerId: player.id, leagueId, tournamentId: activeTournamentId }),
       });
 
       const payload = await response.json();
@@ -1334,13 +1483,14 @@ const loadAuctions = async () => {
       alert(`${player.first_name} ${player.last_name} wurde für ${marketValue.toLocaleString('de-DE')}€ verkauft!`);
       await loadMyTeam();
       
-      // Refresh budget
-      const { data: updatedTeam } = await supabase
-        .from('fantasy_teams')
-        .select('budget')
-        .eq('id', myTeamId)
-        .single();
-      if (updatedTeam?.budget != null) setMyBudget(updatedTeam.budget);
+      // Refresh all tournament budgets
+      const { data: allStats } = await supabase
+        .from('fantasy_team_tournament_stats')
+        .select('tournament_id, budget')
+        .eq('team_id', myTeamId);
+      const updatedMap = new Map<string, number>();
+      for (const row of allStats || []) updatedMap.set(row.tournament_id, row.budget ?? 0);
+      setTournamentBudgets(updatedMap);
 
       setPlayerToSell(null);
       setShowSaleModal(false);
@@ -1355,7 +1505,7 @@ const loadAuctions = async () => {
   const loadTournaments = async () => {
     const { data } = await supabase
       .from('tournaments')
-      .select('id, name, start_date, status, is_active, country_code')
+      .select('id, name, start_date, status, is_active, country_code, newcomer_enabled, start_budget')
       .eq('is_active', true)
       .order('start_date', { ascending: true });
 
@@ -1390,7 +1540,8 @@ const loadAuctions = async () => {
       alert(payload?.error || 'Gebot konnte nicht zurückgezogen werden');
       return;
     }
-    await loadAuctions();
+    // Remove only this bid in-place to avoid resorting the list
+    setAuctions((prev) => prev.map((a) => a.id === auctionId ? { ...a, my_bid: undefined } : a));
   };
 
   const placeBid = async (auctionId: string, bidAmount: number): Promise<boolean> => {
@@ -1404,11 +1555,30 @@ const loadAuctions = async () => {
       alert('Du kannst nicht auf deine eigenen angebotenen Spieler bieten.');
       return false;
     }
+
+    // Use the budget for the auction's specific tournament, fall back to myBudget / 0
+    const auctionTournamentId = auction?.tournament_id ?? activeTournamentId;
+
+    // Only count bids on other auctions within the SAME tournament — budgets are per-tournament.
     const otherBidsTotal = auctions
-      .filter(a => a.id !== auctionId)
+      .filter(a => a.id !== auctionId && a.tournament_id === auctionTournamentId)
       .reduce((sum, a) => sum + (a.my_bid || 0), 0);
-    if (myBudget !== null && otherBidsTotal + bidAmount > myBudget) {
-      alert(`Deine gesamten Gebote (${(otherBidsTotal + bidAmount).toLocaleString('de-DE')}€) würden dein Budget von ${myBudget.toLocaleString('de-DE')}€ überschreiten.`);
+    const relevantBudget = auctionTournamentId
+      ? (tournamentBudgets.get(auctionTournamentId) ?? myBudget ?? 0)
+      : (myBudget ?? 0);
+
+    // Overdraft allowance: up to 1/3 of the tournament's start_budget
+    const auctionTournament = auctionTournamentId ? tournaments.find((t) => t.id === auctionTournamentId) : null;
+    const startBudget = Number(auctionTournament?.start_budget ?? 0);
+    const maxOverdraft = Math.floor(startBudget / 3);
+    const effectiveBudget = relevantBudget + maxOverdraft;
+
+    if (otherBidsTotal + bidAmount > effectiveBudget) {
+      alert(
+        maxOverdraft > 0
+          ? `Deine gesamten Gebote (${(otherBidsTotal + bidAmount).toLocaleString('de-DE')}€) würden dein verfügbares Budget von ${relevantBudget.toLocaleString('de-DE')}€ (inkl. Überziehungsrahmen ${maxOverdraft.toLocaleString('de-DE')}€) überschreiten.`
+          : `Deine gesamten Gebote (${(otherBidsTotal + bidAmount).toLocaleString('de-DE')}€) würden dein Budget von ${relevantBudget.toLocaleString('de-DE')}€ überschreiten.`
+      );
       return false;
     }
     const response = await fetch('/api/league/auctions/bid', {
@@ -1423,15 +1593,17 @@ const loadAuctions = async () => {
       return false;
     }
 
-    // Refresh budget after successful bid
-    const { data: updatedTeam } = await supabase
-      .from('fantasy_teams')
-      .select('budget')
-      .eq('id', myTeamId)
-      .single();
-    if (updatedTeam?.budget != null) setMyBudget(updatedTeam.budget);
+    // Refresh all tournament budgets after successful bid
+    const { data: allStats } = await supabase
+      .from('fantasy_team_tournament_stats')
+      .select('tournament_id, budget')
+      .eq('team_id', myTeamId);
+    const updatedMap = new Map<string, number>();
+    for (const row of allStats || []) updatedMap.set(row.tournament_id, row.budget ?? 0);
+    setTournamentBudgets(updatedMap);
 
-    await loadAuctions();
+    // Update only the bid amount on this auction in-place to avoid resorting the list
+    setAuctions((prev) => prev.map((a) => a.id === auctionId ? { ...a, my_bid: bidAmount } : a));
     return true;
   };
 
@@ -1484,13 +1656,43 @@ const loadAuctions = async () => {
 
     alert(`Gebot angenommen: ${Number(payload?.winningAmount || 0).toLocaleString('de-DE')}€`);
 
-    const { data: updatedTeam } = await supabase
-      .from('fantasy_teams')
-      .select('budget')
-      .eq('id', myTeamId)
-      .single();
+    const { data: allStats } = await supabase
+      .from('fantasy_team_tournament_stats')
+      .select('tournament_id, budget')
+      .eq('team_id', myTeamId);
+    const updatedMap = new Map<string, number>();
+    for (const row of allStats || []) updatedMap.set(row.tournament_id, row.budget ?? 0);
+    setTournamentBudgets(updatedMap);
 
-    if (updatedTeam?.budget != null) setMyBudget(updatedTeam.budget);
+    await loadAuctions();
+    await loadMyTeam();
+    await loadNews();
+  };
+
+  const acceptSystemBid = async (auctionId: string, soldAmount: number, playerName: string) => {
+    if (!myTeamId) return;
+
+    const response = await fetch('/api/league/player-sales/accept-system', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auctionId, leagueId }),
+    });
+
+    const payload = await response.json();
+    if (!response.ok) {
+      alert(payload?.error || 'System-Angebot konnte nicht angenommen werden');
+      return;
+    }
+
+    alert(`${playerName} wurde für ${Number(payload?.soldAmount ?? soldAmount).toLocaleString('de-DE')}€ an das System verkauft!`);
+
+    const { data: allStats } = await supabase
+      .from('fantasy_team_tournament_stats')
+      .select('tournament_id, budget')
+      .eq('team_id', myTeamId);
+    const updatedMap = new Map<string, number>();
+    for (const row of allStats || []) updatedMap.set(row.tournament_id, row.budget ?? 0);
+    setTournamentBudgets(updatedMap);
 
     await loadAuctions();
     await loadMyTeam();
@@ -1837,7 +2039,7 @@ const loadAuctions = async () => {
 
     const { data } = await supabase
       .from('player_matches')
-      .select('id, tournament_name, opponent_name, match_result, match_date, fantasy_points, aces, double_faults, break_points_won, net_points_won, breaks_conceded, winners, unforced_errors')
+      .select('id, tournament_name, opponent_name, match_result, match_date, fantasy_points, aces, double_faults, break_points_won, net_points_won, breaks_conceded, winners, unforced_errors, sets_won')
       .eq('player_id', player.id)
       .order('match_date', { ascending: false });
 
@@ -1845,7 +2047,9 @@ const loadAuctions = async () => {
     setHistoryLoading(false);
   };
 
-  const openTeamInspection = async (team: FantasyTeam) => {
+  const openTeamInspection = async (team: FantasyTeam, inspectTournamentId?: string) => {
+    const tournamentId = inspectTournamentId ?? activeTournamentId;
+    setTeamInspectionTournamentId(tournamentId);
     setTeamInspectionLoading(true);
     setTeamInspection({
       team,
@@ -1855,15 +2059,15 @@ const loadAuctions = async () => {
     });
 
     try {
-      const squad = await loadTeamPlayers(team.id, activeTournamentId);
+      const squad = await loadTeamPlayers(team.id, tournamentId);
 
       let lineupSlots = createEmptyLineupSlots(MAIN_LINEUP_SLOT_COUNT);
       let reserveSlots = createEmptyLineupSlots(RESERVE_LINEUP_SLOT_COUNT);
-      if (activeTournamentId) {
+      if (tournamentId) {
         const { data: lineupData, error: lineupError } = await supabase
           .from('tournament_lineups')
           .select('slot_index, player:players(id, first_name, last_name, ranking, country, image_url)')
-          .eq('tournament_id', activeTournamentId)
+          .eq('tournament_id', tournamentId)
           .eq('team_id', team.id)
           .order('slot_index', { ascending: true });
 
@@ -1903,6 +2107,7 @@ const loadAuctions = async () => {
   const closeTeamInspection = () => {
     setTeamInspection(null);
     setTeamInspectionLoading(false);
+    setTeamInspectionTournamentId('');
   };
 
   const notInLineupPlayers = myTeam.filter(
@@ -1933,6 +2138,21 @@ const loadAuctions = async () => {
   }, [myTeam, myTeamStatMode, playerMarketValues, playerTournamentPoints]);
   const reserveLineupSlots = lineupSlots.slice(RESERVE_SLOT_START_INDEX);
   const activeCourtAccentClass = getTournamentAccentClassByMeta(activeTournament?.name, activeTournament?.id);
+  const inspectionTournament = useMemo(
+    () => (teamInspectionTournamentId ? (tournaments.find((t) => t.id === teamInspectionTournamentId) ?? null) : activeTournament),
+    [teamInspectionTournamentId, tournaments, activeTournament]
+  );
+
+  // Leaderboard sorted & enriched with filtered display points
+  const leaderboardFiltered = useMemo(() => {
+    if (leaderboardFilterTournamentId === 'all') {
+      return leaderboard.map((team) => ({ ...team, displayedPoints: team.total_points_scored }));
+    }
+    const tourneyStats = allTeamTournamentStats.get(leaderboardFilterTournamentId);
+    return [...leaderboard]
+      .map((team) => ({ ...team, displayedPoints: tourneyStats?.get(team.id) ?? 0 }))
+      .sort((a, b) => b.displayedPoints - a.displayedPoints);
+  }, [leaderboard, leaderboardFilterTournamentId, allTeamTournamentStats]);
   const courtSurfacePalette = tournamentCourtSurfaceClasses[activeCourtAccentClass] || tournamentCourtSurfaceClasses['bg-zinc-400'];
   const courtSurfaceClass = isLineupLocked ? courtSurfacePalette.ongoing : courtSurfacePalette.upcoming;
   const inspectionLineupPositions = [
@@ -1974,12 +2194,22 @@ const loadAuctions = async () => {
             <h2 className="text-lg font-bold tracking-tight text-zinc-900 mb-2" style={{ fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif' }}>Rangliste</h2>
             {/* Horizontal tournament pill buttons */}
             <div className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              <button
+                onClick={() => setLeaderboardFilterTournamentId('all')}
+                className={`shrink-0 rounded-full border px-3 py-1.5 text-xs font-semibold transition-all duration-200 active:scale-95 ${
+                  leaderboardFilterTournamentId === 'all'
+                    ? 'border-zinc-900 bg-zinc-900 text-white shadow-sm'
+                    : 'border-zinc-300 bg-white text-zinc-600 hover:border-zinc-400 hover:text-zinc-900'
+                }`}
+              >
+                Gesamt
+              </button>
               {tournaments.map((tournament) => (
                 <button
                   key={`lb-pill-${tournament.id}`}
-                  onClick={() => setActiveTournamentId(tournament.id)}
+                  onClick={() => setLeaderboardFilterTournamentId(tournament.id)}
                   className={`shrink-0 rounded-full border px-3 py-1.5 text-xs font-semibold transition-all duration-200 active:scale-95 ${
-                    activeTournamentId === tournament.id
+                    leaderboardFilterTournamentId === tournament.id
                       ? 'border-zinc-900 bg-zinc-900 text-white shadow-sm'
                       : 'border-zinc-300 bg-white text-zinc-600 hover:border-zinc-400 hover:text-zinc-900'
                   }`}
@@ -1990,14 +2220,8 @@ const loadAuctions = async () => {
             </div>
           </div>
 
-          {!activeTournamentId ? (
-            <div className="mb-4 p-4 bg-white rounded-xl shadow-sm border border-zinc-100 text-zinc-500">
-              Kein aktives Turnier ausgewaehlt.
-            </div>
-          ) : null}
-
           <ul className="space-y-2 pb-20" style={{ fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif' }}>
-            {leaderboard.map((team, index) => {
+            {leaderboardFiltered.map((team, index) => {
               const rank = index + 1;
               const isMe = team.id === myTeamId;
               const isTop3 = rank <= 3;
@@ -2023,7 +2247,7 @@ const loadAuctions = async () => {
                       : 'bg-white border-zinc-100';
 
               const pointsClass =
-                team.total_points_scored < 0
+                team.displayedPoints < 0
                   ? 'text-red-600 font-bold'
                   : rank === 1
                     ? 'text-amber-500 text-xl font-extrabold'
@@ -2039,7 +2263,10 @@ const loadAuctions = async () => {
                 <li key={team.id} ref={isMe ? myLeaderboardRowRef : undefined}>
                   <button
                     onClick={() => {
-                      if (!isMe) openTeamInspection(team);
+                      if (!isMe) {
+                        const inspectTournamentId = leaderboardFilterTournamentId !== 'all' ? leaderboardFilterTournamentId : activeTournamentId;
+                        openTeamInspection(team, inspectTournamentId);
+                      }
                     }}
                     className={`relative w-full flex items-center gap-3 ${isTop3 ? 'p-4' : 'p-3'} rounded-xl border text-left transition-all duration-200 active:scale-[0.98] shadow-sm ${cardBgClass} ${isMe ? 'cursor-default' : 'hover:shadow-md hover:border-zinc-200'}`}
                   >
@@ -2095,7 +2322,7 @@ const loadAuctions = async () => {
                       )}
                       <div className="text-right">
                         <span className={`${pointsClass} leading-none`}>
-                          {team.total_points_scored}
+                          {team.displayedPoints}
                         </span>
                         <span className="ml-1 text-xs text-zinc-400">Pkt</span>
                       </div>
@@ -2117,11 +2344,11 @@ const loadAuctions = async () => {
 
           {/* Sticky "me" banner — appears at bottom when my row is scrolled out of view */}
           {!isMyLeaderboardRowVisible && myTeamId && (() => {
-            const myIndex = leaderboard.findIndex((t) => t.id === myTeamId);
+            const myIndex = leaderboardFiltered.findIndex((t) => t.id === myTeamId);
             if (myIndex < 0) return null;
-            const myEntry = leaderboard[myIndex];
-            const teamAbove = myIndex > 0 ? leaderboard[myIndex - 1] : null;
-            const ptsDiff = teamAbove ? teamAbove.total_points_scored - myEntry.total_points_scored : null;
+            const myEntry = leaderboardFiltered[myIndex];
+            const teamAbove = myIndex > 0 ? leaderboardFiltered[myIndex - 1] : null;
+            const ptsDiff = teamAbove ? teamAbove.displayedPoints - myEntry.displayedPoints : null;
             return (
               <div
                 className="fixed bottom-0 left-0 right-0 z-50 bg-white/90 backdrop-blur-md border-t-2 border-emerald-400 shadow-[0_-4px_24px_rgba(0,0,0,0.15)]"
@@ -2144,7 +2371,7 @@ const loadAuctions = async () => {
                     </span>
                   </div>
                   <div className="flex-shrink-0 text-right">
-                    <p className="text-sm font-bold text-zinc-900">{myEntry.total_points_scored} Pkt</p>
+                    <p className="text-sm font-bold text-zinc-900">{myEntry.displayedPoints} Pkt</p>
                     {ptsDiff !== null && ptsDiff > 0 && (
                       <p className="text-xs text-zinc-500">{ptsDiff} Pkt zum nächsten Platz</p>
                     )}
@@ -2188,7 +2415,11 @@ const loadAuctions = async () => {
             );
           })()}
           {(() => {
-            const groupedAuctions = auctions.reduce((map, auction) => {
+            const visibleAuctions = marketTournamentFilterId === 'all'
+              ? auctions
+              : auctions.filter((a) => a.tournament_id === marketTournamentFilterId);
+
+            const groupedAuctions = visibleAuctions.reduce((map, auction) => {
               const key = auction.tournament_id || auction.tournament_name || 'no-tournament';
               const existing = map.get(key) || [];
               existing.push(auction);
@@ -2196,9 +2427,17 @@ const loadAuctions = async () => {
               return map;
             }, new Map<string, Auction[]>());
 
+            // Sort groups by tournament start_date ascending for a stable, consistent order
+            const tournamentStartDateById = new Map(tournaments.map((t) => [t.id, t.start_date]));
+            const sortedGroupEntries = Array.from(groupedAuctions.entries()).sort(([keyA], [keyB]) => {
+              const dateA = tournamentStartDateById.get(keyA) ?? keyA;
+              const dateB = tournamentStartDateById.get(keyB) ?? keyB;
+              return dateA < dateB ? -1 : dateA > dateB ? 1 : 0;
+            });
+
             return (
               <div className="space-y-4">
-                {Array.from(groupedAuctions.entries()).map(([groupKey, groupAuctions]) => {
+                {sortedGroupEntries.map(([groupKey, groupAuctions]) => {
                   const groupRepresentative = groupAuctions[0];
                   const groupFlag = countryCodeToFlag(groupRepresentative.tournament_country_code || null);
                   const groupName = groupRepresentative.tournament_name || 'Ohne Turnier';
@@ -2232,19 +2471,41 @@ const loadAuctions = async () => {
                               />
                             </div>
                           </div>
-                          {myBudget !== null && (
-                            <div className={`inline-flex shrink-0 items-center gap-2 rounded-lg border border-white/35 px-3 py-1.5 text-zinc-100 shadow-[0_8px_18px_rgba(15,23,42,0.22)] ${groupAccentClass}`}>
-                              <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/20 text-emerald-300">
-                                <Coins className="h-3.5 w-3.5" strokeWidth={2.1} />
-                              </span>
-                              <div className="leading-none">
-                                <p className="text-[9px] uppercase tracking-[0.16em] text-white/80">Wallet</p>
-                                <p className={`mt-0.5 text-sm font-extrabold text-emerald-200 ${sportyNumberClass}`}>
-                                  {formatCurrency(myBudget)}
-                                </p>
+                          {(() => {
+                            const groupTournamentId = groupRepresentative.tournament_id;
+                            const groupBudget = groupTournamentId ? tournamentBudgets.get(groupTournamentId) : undefined;
+                            const projectedBudget = groupTournamentId ? projectedBudgetByTournament.get(groupTournamentId) : undefined;
+                            const hasProjection = projectedBudget !== undefined && projectedBudget !== groupBudget;
+                            const isNegative = groupBudget !== undefined && groupBudget < 0;
+                            const isProjectedNegative = projectedBudget !== undefined && projectedBudget < 0;
+                            const projectedDelta = hasProjection && groupBudget !== undefined ? projectedBudget - groupBudget : 0;
+                            return groupBudget !== undefined ? (
+                              <div className="flex flex-col items-end gap-1">
+                                <div className={`inline-flex shrink-0 items-center gap-2 rounded-lg border px-3 py-1.5 text-zinc-100 shadow-[0_8px_18px_rgba(15,23,42,0.22)] ${isNegative ? 'border-red-400/50 bg-red-900/80' : `border-white/35 ${groupAccentClass}`}`}>
+                                  <span className={`inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/20 ${isNegative ? 'text-red-300' : 'text-emerald-300'}`}>
+                                    {isNegative ? <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2.1} /> : <Coins className="h-3.5 w-3.5" strokeWidth={2.1} />}
+                                  </span>
+                                  <div className="leading-none">
+                                    <p className="text-[9px] uppercase tracking-[0.16em] text-white/80">Wallet</p>
+                                    <p className={`mt-0.5 text-sm font-extrabold ${isNegative ? 'text-red-300' : 'text-emerald-200'} ${sportyNumberClass}`}>
+                                      {formatCurrency(groupBudget)}
+                                    </p>
+                                  </div>
+                                </div>
+                                {hasProjection && (
+                                  <div className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-dashed border-amber-400/70 bg-amber-950/60 px-2.5 py-1 text-amber-200 shadow-[0_4px_10px_rgba(0,0,0,0.3)]">
+                                    <span className={`text-[10px] font-extrabold ${isProjectedNegative ? 'text-red-300' : 'text-amber-200'} ${sportyNumberClass}`}>
+                                      {formatCurrency(projectedBudget!)}
+                                    </span>
+                                    <span className={`text-[9px] font-semibold ${projectedDelta >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                                      ({projectedDelta >= 0 ? '+' : ''}{formatCurrency(projectedDelta)})
+                                    </span>
+                                    <span className="text-[8px] uppercase tracking-[0.14em] text-amber-400/80">Vorschau</span>
+                                  </div>
+                                )}
                               </div>
-                            </div>
-                          )}
+                            ) : null;
+                          })()}
                         </div>
                       </button>
                       <ul id={groupContentId} className={`${isGroupCollapsed ? 'hidden' : 'space-y-2'}`}>
@@ -2391,10 +2652,23 @@ const loadAuctions = async () => {
                                   </div>
                                 ) : null}
 
-                                {isOwnSale && (auction.incoming_bids?.length || 0) > 0 && (
+                                {isOwnSale && (
                                   <div className="mt-2 space-y-1.5">
-                                    <p className="text-xs font-semibold text-zinc-600">Eingegangene Gebote</p>
+                                    <p className="text-xs font-semibold text-zinc-600">Angebote</p>
                                     <ul className="space-y-1.5">
+                                      <li className="flex items-center justify-between gap-2 rounded-lg border border-blue-200 bg-blue-50 px-2 py-1.5">
+                                        <div className="text-xs text-zinc-700 truncate flex items-center gap-1.5">
+                                          <Bot className="h-3.5 w-3.5 text-blue-500 shrink-0" strokeWidth={2.1} />
+                                          <span className="font-semibold text-blue-900">{formatCurrency(auction.market_value || 0)}</span>
+                                          <span className="text-blue-700">vom System</span>
+                                        </div>
+                                        <button
+                                          onClick={() => acceptSystemBid(auction.id, auction.market_value || 0, `${auction.player.first_name} ${auction.player.last_name}`)}
+                                          className="text-[11px] px-2 py-1 rounded-full border border-blue-300 text-blue-700 hover:bg-blue-100 shrink-0"
+                                        >
+                                          Annehmen
+                                        </button>
+                                      </li>
                                       {(auction.incoming_bids || []).map((bid) => (
                                         <li key={`${auction.id}-${bid.team_id}`} className="flex items-center justify-between gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1.5">
                                           <div className="text-xs text-zinc-700 truncate">
@@ -2483,13 +2757,13 @@ const loadAuctions = async () => {
                           </div>
                         </div>
                         {myBudget !== null && (
-                          <div className={`inline-flex shrink-0 items-center gap-2 rounded-lg border border-white/35 px-3 py-1.5 text-zinc-100 shadow-[0_8px_18px_rgba(15,23,42,0.22)] ${accentClass}`}>
-                            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/20 text-emerald-300">
-                              <Coins className="h-3.5 w-3.5" strokeWidth={2.1} />
+                          <div className={`inline-flex shrink-0 items-center gap-2 rounded-lg border px-3 py-1.5 text-zinc-100 shadow-[0_8px_18px_rgba(15,23,42,0.22)] ${myBudget < 0 ? 'border-red-400/50 bg-red-900/80' : `border-white/35 ${accentClass}`}`}>
+                            <span className={`inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/20 ${myBudget < 0 ? 'text-red-300' : 'text-emerald-300'}`}>
+                              {myBudget < 0 ? <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2.1} /> : <Coins className="h-3.5 w-3.5" strokeWidth={2.1} />}
                             </span>
                             <div className="leading-none">
                               <p className="text-[9px] uppercase tracking-[0.16em] text-white/80">Wallet</p>
-                              <p className={`mt-0.5 text-sm font-extrabold text-emerald-200 ${sportyNumberClass}`}>
+                              <p className={`mt-0.5 text-sm font-extrabold ${myBudget < 0 ? 'text-red-300' : 'text-emerald-200'} ${sportyNumberClass}`}>
                                 {formatCurrency(myBudget)}
                               </p>
                             </div>
@@ -2504,6 +2778,15 @@ const loadAuctions = async () => {
                   <h2 className="text-lg font-bold tracking-tight text-zinc-900" style={{ fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif' }}>
                     Mein Team
                   </h2>
+                </div>
+              )}
+
+              {myBudget !== null && myBudget < 0 && (
+                <div className="flex items-start gap-2.5 rounded-xl border border-red-300 bg-red-50 px-3.5 py-2.5 text-sm text-red-800">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" strokeWidth={2.1} />
+                  <p>
+                    <span className="font-semibold">Konto überzogen:</span> Mit negativem Kontostand erhältst du <span className="font-semibold">keine Punkte</span> für die Leistungen deiner Spieler in diesem Turnier.
+                  </p>
                 </div>
               )}
 
@@ -2622,13 +2905,11 @@ const loadAuctions = async () => {
                           </p>
                         )}
                         <button
-                          onClick={() => {
-                            setPlayerToSell(player);
-                            setShowSaleModal(true);
-                          }}
-                          className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-orange-200 text-orange-600 transition-colors duration-150 hover:bg-orange-50"
-                          title={`${player.first_name} ${player.last_name} verkaufen`}
-                          aria-label={`${player.first_name} ${player.last_name} verkaufen`}
+                          onClick={() => offerPlayerForSale(player)}
+                          disabled={sellLoading}
+                          className="mt-1 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-orange-200 text-orange-600 transition-colors duration-150 hover:bg-orange-50 disabled:opacity-50"
+                          title={`${player.first_name} ${player.last_name} auf Transfermarkt anbieten`}
+                          aria-label={`${player.first_name} ${player.last_name} auf Transfermarkt anbieten`}
                         >
                           <ArrowUpRight className="h-4 w-4" strokeWidth={2.2} />
                         </button>
@@ -2793,10 +3074,10 @@ const loadAuctions = async () => {
                             <p className="mt-1.5 truncate text-[13px] font-bold tracking-tight text-zinc-900">{formatLineupPlayerName(player)}</p>
                             {activeTournament?.status === 'upcoming' && hasPrioritySeedingStar(player.seeding_status) ? (
                               <span
-                                className="absolute -bottom-3 left-1/2 z-20 inline-flex h-7 w-7 -translate-x-1/2 items-center justify-center rounded-full border border-amber-300 bg-amber-100 text-amber-700 shadow-[0_6px_14px_rgba(120,53,15,0.28)]"
+                                className={`absolute -bottom-2.5 left-1/2 z-20 inline-flex h-6 w-6 -translate-x-1/2 items-center justify-center rounded-full border shadow-sm ${getSeedingStarClass(player.seeding_status)}`}
                                 title={player.seeding_status || undefined}
                               >
-                                <Star className="h-4.5 w-4.5" strokeWidth={2.3} fill="currentColor" />
+                                <Star className="h-3.5 w-3.5" strokeWidth={2} fill="currentColor" />
                               </span>
                             ) : null}
                             {!showUpcomingMinimalCard && (
@@ -2837,6 +3118,7 @@ const loadAuctions = async () => {
                 </div>
               </div>
 
+              {activeTournament?.newcomer_enabled !== false && (
               <div
                 className={`rounded-2xl p-4 sm:p-5 shadow-md mb-5 border ${isLineupLocked ? 'bg-pink-300 border-pink-200' : 'bg-pink-100 border-pink-200'} ${!isLineupEditMode && !isLineupLocked ? 'cursor-pointer' : ''}`}
                 onClick={() => {
@@ -2907,10 +3189,10 @@ const loadAuctions = async () => {
                             <p className="text-xs font-semibold mt-1 truncate text-pink-950">{formatLineupPlayerName(player)}</p>
                             {activeTournament?.status === 'upcoming' && hasPrioritySeedingStar(player.seeding_status) ? (
                               <span
-                                className="absolute -bottom-3 left-1/2 z-20 inline-flex h-7 w-7 -translate-x-1/2 items-center justify-center rounded-full border border-amber-300 bg-amber-100 text-amber-700 shadow-[0_6px_14px_rgba(120,53,15,0.28)]"
+                                className={`absolute -bottom-2.5 left-1/2 z-20 inline-flex h-6 w-6 -translate-x-1/2 items-center justify-center rounded-full border shadow-sm ${getSeedingStarClass(player.seeding_status)}`}
                                 title={player.seeding_status || undefined}
                               >
-                                <Star className="h-4.5 w-4.5" strokeWidth={2.3} fill="currentColor" />
+                                <Star className="h-3.5 w-3.5" strokeWidth={2} fill="currentColor" />
                               </span>
                             ) : null}
                             {!showUpcomingMinimalCard && (
@@ -2943,6 +3225,7 @@ const loadAuctions = async () => {
                   })}
                 </div>
               </div>
+              )}
 
               <div
                 className={`bg-white rounded-2xl border border-zinc-100 p-4 ${isLineupEditMode ? 'touch-none hidden' : ''}`}
@@ -3097,30 +3380,38 @@ const loadAuctions = async () => {
         <div>
           <h2 className="text-xl font-semibold mb-4">News</h2>
           {news.length === 0 ? (
-            <div className="p-4 bg-white rounded-xl shadow-sm border border-zinc-100 text-zinc-500">Keine News vorhanden.</div>
+            <div className="relative overflow-hidden p-4 bg-white rounded-2xl border border-[#efefef] shadow-[0_8px_18px_rgba(15,23,42,0.07)] text-zinc-500">Keine News vorhanden.</div>
           ) : (
             <ul className="space-y-3">
-              {news.map((entry) => (
-                <li key={entry.id} className="p-4 bg-white rounded-xl shadow-sm border border-zinc-100">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-semibold text-zinc-900 flex items-center gap-2">
-                      {entry.team_image_url && (
-                        <img
-                          src={entry.team_image_url}
-                          alt="Manager"
-                          className="w-6 h-6 rounded-full object-cover border border-zinc-300"
-                        />
-                      )}
-                      {entry.title}
-                      {isNewsEntryNew(entry.created_at) && (
-                        <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" aria-label="Neuer Eintrag" title="Neuer Eintrag" />
-                      )}
-                    </span>
-                    <span className="text-xs text-zinc-500">{new Date(entry.created_at).toLocaleString('de-DE')}</span>
-                  </div>
-                  <p className="text-sm text-zinc-600">{entry.message}</p>
-                </li>
-              ))}
+              {news.map((entry) => {
+                const newsAccentClass = entry.tournament_id
+                  ? getTournamentAccentClassByMeta(entry.tournament_name, entry.tournament_id)
+                  : 'bg-zinc-200';
+                return (
+                  <li key={entry.id} className="relative overflow-hidden rounded-2xl bg-white border border-[#efefef] shadow-[0_8px_18px_rgba(15,23,42,0.07)] transition-all duration-200 hover:shadow-[0_10px_24px_rgba(15,23,42,0.10)]">
+                    <div className={`absolute inset-y-0 left-0 w-1 ${newsAccentClass}`} />
+                    <div className="pl-4 pr-3 py-3">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-semibold text-zinc-900 flex items-center gap-2">
+                          {entry.team_image_url && (
+                            <img
+                              src={entry.team_image_url}
+                              alt="Manager"
+                              className="w-6 h-6 rounded-full object-cover border border-zinc-300"
+                            />
+                          )}
+                          {entry.title}
+                          {isNewsEntryNew(entry.created_at) && (
+                            <span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" aria-label="Neuer Eintrag" title="Neuer Eintrag" />
+                          )}
+                        </span>
+                        <span className="text-xs text-zinc-500">{new Date(entry.created_at).toLocaleString('de-DE')}</span>
+                      </div>
+                      <p className="text-sm text-zinc-600">{entry.message}</p>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
@@ -3128,58 +3419,149 @@ const loadAuctions = async () => {
 
       {historyPlayer && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto p-5">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">
-                Matchhistorie: {historyPlayer.first_name} {historyPlayer.last_name}
-              </h3>
-              <span className="text-sm px-2 py-1 rounded-md bg-zinc-100 text-zinc-700 font-medium">
-                Ranking #{historyPlayer.ranking}
-              </span>
+          <div className="bg-white rounded-2xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
+            {/* Modal Header */}
+            <div className="bg-gradient-to-r from-zinc-800 to-zinc-900 text-white px-5 py-4 flex items-center justify-between shrink-0">
+              <div>
+                <h3 className="text-lg font-bold">
+                  {historyPlayer.first_name} {historyPlayer.last_name}
+                </h3>
+                <p className="text-zinc-400 text-sm">Ranking #{historyPlayer.ranking} · {historyPlayer.country}</p>
+              </div>
               <button
                 onClick={() => setHistoryPlayer(null)}
-                className="px-3 py-1 rounded-lg border border-zinc-300 hover:bg-zinc-50"
+                className="text-zinc-400 hover:text-white hover:bg-zinc-700 rounded-full p-1.5 transition-colors"
               >
-                Schliessen
+                <X className="h-5 w-5" />
               </button>
             </div>
 
-            {historyLoading ? (
-              <p className="text-zinc-500">Lade Matchhistorie...</p>
-            ) : historyMatches.length === 0 ? (
-              <p className="text-zinc-500">Keine Matches vorhanden.</p>
-            ) : (
-              <div className="space-y-3">
-                {historyMatches.map((match) => (
-                  <div key={match.id} className="p-4 border border-zinc-200 rounded-xl">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="font-semibold text-zinc-900">{match.tournament_name}</span>
-                      <span className="text-xs text-zinc-500">{new Date(match.match_date).toLocaleDateString('de-DE')}</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-sm">
-                      <div><span className="text-zinc-500">Gegner:</span> {match.opponent_name}</div>
-                      <div>
-                        <span className="text-zinc-500">Ergebnis:</span>{' '}
-                        <span className={match.match_result === 'won' ? 'text-green-600 font-medium' : 'text-red-600'}>
-                          {match.match_result === 'won' ? 'Sieg' : 'Niederlage'}
-                        </span>
+            {/* Body */}
+            <div className="overflow-y-auto p-5 space-y-4">
+              {historyLoading ? (
+                <p className="text-zinc-500 py-8 text-center">Lade Matchhistorie...</p>
+              ) : historyMatches.length === 0 ? (
+                <p className="text-zinc-500 py-8 text-center">Keine Matches vorhanden.</p>
+              ) : (
+                historyMatches.map((match) => {
+                  const isWin = match.match_result === 'won';
+                  return (
+                    <div
+                      key={match.id}
+                      className={`rounded-xl border overflow-hidden ${isWin ? 'border-green-200' : 'border-red-200'}`}
+                    >
+                      {/* Match header bar */}
+                      <div className={`px-4 py-2 flex items-center justify-between ${isWin ? 'bg-green-50' : 'bg-red-50'}`}>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className={`shrink-0 text-xs font-bold px-2 py-0.5 rounded-full ${isWin ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                            {isWin ? 'Sieg' : 'Niederlage'}
+                          </span>
+                          <span className="text-sm font-semibold text-zinc-800 truncate">{match.tournament_name}</span>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0 ml-2">
+                          <span className="text-xs text-zinc-500">{new Date(match.match_date).toLocaleDateString('de-DE')}</span>
+                          <span className={`text-sm font-bold px-3 py-1 rounded-full ${match.fantasy_points >= 100 ? 'bg-emerald-500 text-white' : match.fantasy_points >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                            {match.fantasy_points} pts
+                          </span>
+                        </div>
                       </div>
-                      <div><span className="text-zinc-500">Asse:</span> {match.aces}</div>
-                      <div><span className="text-zinc-500">Doppelfehler:</span> {match.double_faults}</div>
-                      <div><span className="text-zinc-500">Break Points:</span> {match.break_points_won}</div>
-                      <div><span className="text-zinc-500">Net-Points Won:</span> {match.net_points_won || 0}</div>
-                      <div><span className="text-zinc-500">Break kassiert:</span> {match.breaks_conceded || 0}</div>
-                      <div><span className="text-zinc-500">Winners:</span> {match.winners}</div>
-                      <div><span className="text-zinc-500">Unforced Errors:</span> {match.unforced_errors}</div>
-                      <div>
-                        <span className="text-zinc-500">Fantasy Punkte:</span>{' '}
-                        <span className={`font-semibold ${match.fantasy_points < 0 ? 'text-red-600' : 'text-emerald-600'}`}>{match.fantasy_points}</span>
+
+                      {/* Opponent */}
+                      <div className="px-4 py-2 border-b border-zinc-100 text-xs text-zinc-500">
+                        vs. <span className="font-medium text-zinc-700">{match.opponent_name}</span>
+                      </div>
+
+                      {/* Kacheln: Asse / Winners / Fantasy */}
+                      <div className="px-4 pt-3 pb-2 grid grid-cols-3 gap-2">
+                        <div className="bg-amber-50 rounded-lg p-2 text-center">
+                          <p className="text-base leading-none mb-0.5">⚡</p>
+                          <p className="text-xl font-bold text-amber-700">{match.aces}</p>
+                          <p className="text-xs text-amber-600">Asse</p>
+                        </div>
+                        <div className="bg-orange-50 rounded-lg p-2 text-center">
+                          <p className="text-base leading-none mb-0.5">🔥</p>
+                          <p className="text-xl font-bold text-orange-700">{match.winners}</p>
+                          <p className="text-xs text-orange-600">Winners</p>
+                        </div>
+                        <div className="bg-sky-50 rounded-lg p-2 text-center">
+                          <p className="text-base leading-none mb-0.5">🎾</p>
+                          <p className="text-xl font-bold text-sky-700">{match.sets_won || 0}</p>
+                          <p className="text-xs text-sky-600">Sätze gew.</p>
+                        </div>
+                        <div className={`rounded-lg p-2 text-center ${match.fantasy_points >= 0 ? 'bg-emerald-50' : 'bg-red-50'}`}>
+                          <p className="text-base leading-none mb-0.5">🏅</p>
+                          <p className={`text-xl font-bold ${match.fantasy_points >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>{match.fantasy_points}</p>
+                          <p className={`text-xs ${match.fantasy_points >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>Fantasy Pts</p>
+                        </div>
+                      </div>
+
+                      {/* Zwei-Spalten Stats */}
+                      <div className="px-4 pb-4 grid grid-cols-2 gap-x-5 gap-y-1">
+                        {/* Offensiv */}
+                        <div>
+                          <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wide mb-2">Offensiv</p>
+                          <div className="space-y-2">
+                            <div>
+                              <div className="flex justify-between text-xs mb-1">
+                                <span className="text-zinc-500">Break Points</span>
+                                <span className="font-semibold text-zinc-700">{match.break_points_won}</span>
+                              </div>
+                              <div className="w-full bg-zinc-100 rounded-full h-1.5">
+                                <div
+                                  className="bg-emerald-500 h-1.5 rounded-full transition-all"
+                                  style={{ width: `${Math.min((match.break_points_won / 8) * 100, 100)}%` }}
+                                />
+                              </div>
+                            </div>
+                            <div>
+                              <div className="flex justify-between text-xs mb-1">
+                                <span className="text-zinc-500">Net-Points Won</span>
+                                <span className="font-semibold text-zinc-700">{match.net_points_won || 0}</span>
+                              </div>
+                              <div className="w-full bg-zinc-100 rounded-full h-1.5">
+                                <div
+                                  className="bg-blue-400 h-1.5 rounded-full transition-all"
+                                  style={{ width: `${Math.min(((match.net_points_won || 0) / 10) * 100, 100)}%` }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Defensiv */}
+                        <div>
+                          <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wide mb-2">Defensiv / Fehler</p>
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="text-zinc-500 flex items-center gap-1">
+                                <span className="text-red-500 font-bold">✕</span> Doppelfehler
+                              </span>
+                              <span className="font-semibold text-red-600">{match.double_faults}</span>
+                            </div>
+                            <div>
+                              <div className="flex justify-between text-xs mb-1">
+                                <span className="text-zinc-500">Unforced Errors</span>
+                                <span className="font-semibold text-red-600">{match.unforced_errors}</span>
+                              </div>
+                              <div className="w-full bg-zinc-100 rounded-full h-1.5">
+                                <div
+                                  className="bg-red-400 h-1.5 rounded-full transition-all"
+                                  style={{ width: `${Math.min((match.unforced_errors / 40) * 100, 100)}%` }}
+                                />
+                              </div>
+                            </div>
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="text-zinc-500">Break kassiert</span>
+                              <span className="font-semibold text-orange-600">{match.breaks_conceded || 0}</span>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            )}
+                  );
+                })
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -3192,7 +3574,7 @@ const loadAuctions = async () => {
                 <h3 className="text-lg font-semibold text-zinc-900">{teamInspection.team.name}</h3>
                 <p className="text-sm text-zinc-500">
                   {teamInspection.team.total_points_scored} Punkte
-                  {activeTournament ? ` · Aufstellung fuer ${activeTournament.name}` : ''}
+                  {inspectionTournament ? ` · Aufstellung fuer ${inspectionTournament.name}` : ''}
                 </p>
               </div>
               <button
@@ -3210,21 +3592,26 @@ const loadAuctions = async () => {
                 <section>
                   <div className="flex items-center justify-between mb-3">
                     <h4 className="font-semibold text-zinc-900">Aktuelle Aufstellung</h4>
-                    {activeTournament && (
+                    {inspectionTournament && (
                       <span className="text-xs px-2 py-1 rounded-md bg-sky-100 text-sky-700">
-                        {activeTournament.name}
+                        {inspectionTournament.name}
                       </span>
                     )}
                   </div>
 
-                  {!activeTournament ? (
+                  {!inspectionTournament ? (
                     <p className="text-sm text-zinc-500">Derzeit gibt es kein aktives Turnier.</p>
                   ) : teamInspection.lineupSlots.every((player) => !player) && teamInspection.reserveSlots.every((player) => !player) ? (
                     <p className="text-sm text-zinc-500">Dieses Team hat aktuell keine Aufstellung hinterlegt.</p>
                   ) : (
                     <div className="space-y-4">
-                      <div className={`${activeTournament.status === 'on-going' ? 'bg-sky-500 border-sky-400' : 'bg-sky-300 border-sky-200'} rounded-2xl p-4 sm:p-6 shadow-md border`}>
-                        {activeTournament.status === 'on-going' && (
+                      {(() => {
+                        const inspCourtAccent = getTournamentAccentClassByMeta(inspectionTournament?.name, inspectionTournament?.id);
+                        const inspCourtPalette = tournamentCourtSurfaceClasses[inspCourtAccent] || tournamentCourtSurfaceClasses['bg-zinc-400'];
+                        const inspCourtClass = inspectionTournament?.status === 'on-going' ? inspCourtPalette.ongoing : inspCourtPalette.upcoming;
+                        return (
+                      <div className={`${inspCourtClass} rounded-2xl p-4 sm:p-6 shadow-md border`}>
+                        {inspectionTournament?.status === 'on-going' && (
                           <div className="mb-3 rounded-lg border border-white/35 bg-[#0f172acc] px-3 py-1.5">
                             <p className="text-xs font-semibold text-emerald-300">
                               Gesamtpunkte: {teamInspection.team.total_points_scored} Pkt | Rang im Turnier: {inspectedTeamRank ? `#${inspectedTeamRank}` : '-'}
@@ -3246,14 +3633,14 @@ const loadAuctions = async () => {
                             const roundLabel = roundState?.label || 'R1/R2';
                             const isOut = roundLabel === 'OUT';
                             const showLivePulse = Boolean(
-                              activeTournament?.status === 'on-going'
+                              inspectionTournament?.status === 'on-going'
                               && player
                               && (roundLabel === 'QF' || (roundState?.inTournament && !isOut))
                             );
                             const displayedPoints = player ? getDisplayedLineupPoints(player, slotIndex) : 0;
                             const highlightActive = Boolean(
                               player
-                              && activeTournament?.status === 'on-going'
+                              && inspectionTournament?.status === 'on-going'
                               && (roundState ? roundState.inTournament : true)
                             );
 
@@ -3262,25 +3649,44 @@ const loadAuctions = async () => {
                                 key={slotIndex}
                                 className={`absolute ${inspectionLineupPositions[slotIndex]} w-28 sm:w-32`}
                               >
-                                <div className={`rounded-xl border-2 border-dashed border-white/70 bg-white/90 min-h-24 p-2 text-center ${showLivePulse ? 'animate-[pulse_4.2s_ease-in-out_infinite] shadow-[0_0_0_1px_rgba(74,222,128,0.12),0_0_5px_rgba(74,222,128,0.08)]' : ''}`}>
+                                <div className="rounded-2xl border border-white/55 bg-white/30 p-2.5 text-center backdrop-blur-md shadow-[0_12px_26px_rgba(15,23,42,0.22)] transition-all duration-200">
                                   {player ? (
                                     <button
                                       onClick={() => openPlayerHistory(player)}
-                                      className="w-full text-center hover:opacity-85"
+                                      className={`relative w-full text-center hover:opacity-85${inspectionTournament?.status === 'upcoming' && hasPrioritySeedingStar(player.seeding_status) ? ' pb-3' : ''}`}
                                       title={formatLineupPlayerName(player)}
                                     >
                                       <img
                                         src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                                         alt={`${player.first_name} ${player.last_name}`}
-                                        className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-zinc-200'} ${isOut ? 'opacity-60' : ''}`}
+                                        className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 border-white/85 shadow-[0_4px_14px_rgba(15,23,42,0.24)] ${highlightActive ? 'ring-2 ring-emerald-300/80' : ''} ${showLivePulse ? 'animate-[pulse_2.8s_ease-in-out_infinite]' : ''} ${isOut ? 'opacity-70' : ''}`}
                                       />
-                                      <p className="text-xs font-semibold mt-1">{formatLineupPlayerName(player)}</p>
-                                      <p className="text-xs text-zinc-500">#{player.ranking}</p>
-                                      <p className={`${activeTournament.status === 'on-going' ? `mt-1 inline-flex items-center rounded-md px-1.5 py-0.5 text-[14px] leading-none font-extrabold border ${displayedPoints < 0 ? 'bg-red-100 text-red-700 border-red-200' : 'bg-emerald-950 text-lime-300 border-emerald-700'}` : `text-xs font-bold ${getPointsTextClass(displayedPoints)}`}`}>{displayedPoints} Pkt</p>
-                                      <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-sky-700'}`}>{roundLabel}</p>
+                                      <p className="mt-1.5 truncate text-[13px] font-bold tracking-tight text-zinc-900">{formatLineupPlayerName(player)}</p>
+                                      {inspectionTournament?.status === 'upcoming' && hasPrioritySeedingStar(player.seeding_status) ? (
+                                        <span
+                                          className={`absolute -bottom-2.5 left-1/2 z-20 inline-flex h-6 w-6 -translate-x-1/2 items-center justify-center rounded-full border shadow-sm ${getSeedingStarClass(player.seeding_status)}`}
+                                          title={player.seeding_status || undefined}
+                                        >
+                                          <Star className="h-3.5 w-3.5" strokeWidth={2} fill="currentColor" />
+                                        </span>
+                                      ) : null}
+                                      {inspectionTournament?.status !== 'upcoming' && (
+                                        <>
+                                          <div className="mt-1 flex items-center justify-center gap-1.5">
+                                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${roundLabel === 'OUT' ? 'bg-red-100 text-red-700 border border-red-200' : roundLabel === 'QF' ? 'bg-sky-100 text-sky-700 border border-sky-200' : 'bg-white/70 text-zinc-700 border border-white/70'}`}>
+                                              {roundLabel}
+                                            </span>
+                                          </div>
+                                          <p className="mt-1.5 inline-flex items-center rounded-full border border-emerald-900/50 bg-emerald-900 px-2.5 py-1 text-[11px] font-bold text-white shadow-sm">
+                                            {displayedPoints} Pkt
+                                          </p>
+                                        </>
+                                      )}
                                     </button>
                                   ) : (
-                                    <p className="text-xs text-zinc-500 pt-7">Freier Slot</p>
+                                    <div className="flex flex-col items-center justify-center py-3">
+                                      <p className="text-xs font-medium text-white/70">Freier Slot</p>
+                                    </div>
                                   )}
                                 </div>
                               </div>
@@ -3288,8 +3694,11 @@ const loadAuctions = async () => {
                           })}
                         </div>
                       </div>
+                        );
+                      })()}
 
-                      <div className="bg-pink-100 rounded-2xl p-4 shadow-md border border-pink-200">
+                      {inspectionTournament?.newcomer_enabled !== false && (
+                      <div className={`${inspectionTournament?.status === 'on-going' ? 'bg-pink-300 border-pink-200' : 'bg-pink-100 border-pink-200'} rounded-2xl p-4 shadow-md border`}>
                         <div className="flex items-start justify-between gap-3 mb-3">
                           <div>
                             <h5 className="font-semibold text-pink-900">New Comer</h5>
@@ -3302,34 +3711,45 @@ const loadAuctions = async () => {
                             const roundLabel = roundState?.label || 'R1/R2';
                             const isOut = roundLabel === 'OUT';
                             const showLivePulse = Boolean(
-                              activeTournament?.status === 'on-going'
+                              inspectionTournament?.status === 'on-going'
                               && player
                               && (roundLabel === 'QF' || (roundState?.inTournament && !isOut))
                             );
                             const displayedPoints = player ? getDisplayedLineupPoints(player, slotIndex) : 0;
                             const highlightActive = Boolean(
                               player
-                              && activeTournament?.status === 'on-going'
+                              && inspectionTournament?.status === 'on-going'
                               && (roundState ? roundState.inTournament : true)
                             );
 
                             return (
-                              <div key={slotIndex} className={`rounded-xl border-2 border-dashed border-pink-300 bg-white/90 min-h-24 p-2 text-center ${showLivePulse ? 'animate-[pulse_4.2s_ease-in-out_infinite] shadow-[0_0_0_1px_rgba(74,222,128,0.11),0_0_5px_rgba(74,222,128,0.07)]' : ''}`}>
+                              <div key={slotIndex} className="relative rounded-xl border-2 border-pink-300 bg-white/90 p-2.5 text-center shadow-sm">
                                 {player ? (
                                   <button
                                     onClick={() => openPlayerHistory(player)}
-                                    className="w-full text-center hover:opacity-85"
+                                    className={`relative w-full text-center hover:opacity-85${inspectionTournament?.status === 'upcoming' && hasPrioritySeedingStar(player.seeding_status) ? ' pb-3' : ''}`}
                                     title={formatLineupPlayerName(player)}
                                   >
                                     <img
                                       src={player.image_url || `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/player-images/default.png`}
                                       alt={`${player.first_name} ${player.last_name}`}
-                                      className={`w-14 h-14 sm:w-16 sm:h-16 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-pink-200'} ${isOut ? 'opacity-60' : ''}`}
+                                      className={`w-12 h-12 sm:w-14 sm:h-14 rounded-full object-cover mx-auto border-2 ${highlightActive ? 'border-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.25)]' : 'border-pink-200'} ${showLivePulse ? 'animate-[pulse_2.8s_ease-in-out_infinite]' : ''} ${isOut ? 'opacity-60' : ''}`}
                                     />
-                                    <p className="text-xs font-semibold mt-1 text-pink-950">{formatLineupPlayerName(player)}</p>
-                                    <p className="text-xs text-zinc-500">#{player.ranking}</p>
-                                    <p className={`${activeTournament.status === 'on-going' ? `mt-1 inline-flex items-center rounded-md px-1.5 py-0.5 text-[14px] leading-none font-extrabold border ${displayedPoints < 0 ? 'bg-red-100 text-red-700 border-red-200' : 'bg-emerald-950 text-lime-300 border-emerald-700'}` : `text-xs font-bold ${getPointsTextClass(displayedPoints)}`}`}>{displayedPoints} Pkt</p>
-                                    <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-pink-700'}`}>{roundLabel}</p>
+                                    <p className="text-xs font-semibold mt-1 truncate text-pink-950">{formatLineupPlayerName(player)}</p>
+                                    {inspectionTournament?.status === 'upcoming' && hasPrioritySeedingStar(player.seeding_status) ? (
+                                      <span
+                                        className={`absolute -bottom-2.5 left-1/2 z-20 inline-flex h-6 w-6 -translate-x-1/2 items-center justify-center rounded-full border shadow-sm ${getSeedingStarClass(player.seeding_status)}`}
+                                        title={player.seeding_status || undefined}
+                                      >
+                                        <Star className="h-3.5 w-3.5" strokeWidth={2} fill="currentColor" />
+                                      </span>
+                                    ) : null}
+                                    {inspectionTournament?.status !== 'upcoming' && (
+                                      <>
+                                        <p className={`${inspectionTournament?.status === 'on-going' ? `mt-1 inline-flex items-center rounded-md px-1.5 py-0.5 text-[14px] leading-none font-extrabold border ${displayedPoints < 0 ? 'bg-red-100 text-red-700 border-red-200' : 'bg-emerald-950 text-lime-300 border-emerald-700'}` : `text-xs font-bold ${getPointsTextClass(displayedPoints)}`}`}>{displayedPoints} Pkt</p>
+                                        <p className={`text-[11px] font-semibold ${roundLabel === 'OUT' ? 'text-red-600' : 'text-pink-700'}`}>{roundLabel}</p>
+                                      </>
+                                    )}
                                   </button>
                                 ) : (
                                   <div className="pt-5">
@@ -3342,6 +3762,7 @@ const loadAuctions = async () => {
                           })}
                         </div>
                       </div>
+                      )}
                     </div>
                   )}
                 </section>

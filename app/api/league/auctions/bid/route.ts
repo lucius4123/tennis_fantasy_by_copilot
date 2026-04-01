@@ -29,7 +29,7 @@ export async function POST(request: Request) {
 
     const { data: team, error: teamError } = await supabase
       .from('fantasy_teams')
-      .select('id, budget')
+      .select('id')
       .eq('league_id', leagueId)
       .eq('user_id', user.id)
       .single()
@@ -41,7 +41,7 @@ export async function POST(request: Request) {
     const nowIso = new Date().toISOString()
     const { data: auction, error: auctionError } = await supabase
       .from('market_auctions')
-      .select('id, end_time, player_id, seller_team_id')
+      .select('id, end_time, player_id, seller_team_id, tournament_id')
       .eq('id', auctionId)
       .eq('league_id', leagueId)
       .single()
@@ -58,36 +58,62 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Du kannst nicht auf dein eigenes Angebot bieten' }, { status: 400 })
     }
 
-    // Get the market value for the player in the active tournament
-    const { data: activeTournament } = await supabase
-      .from('tournaments')
-      .select('id')
-      .eq('is_active', true)
-      .single()
+    // Determine which tournament this auction belongs to and load the team's budget for it.
+    // Use auction.tournament_id directly; fall back to looking up via tournament_players if missing.
+    let auctionTournamentId: string | null = auction.tournament_id ?? null
+    let auctionMarketValue: number | null = null
 
-    if (activeTournament) {
-      const { data: tournamentPlayer } = await supabase
-        .from('tournament_players')
-        .select('market_value')
-        .eq('tournament_id', activeTournament.id)
-        .eq('player_id', auction.player_id)
-        .single()
+    // Market-value minimum check — still reads from tournament_players
+    const { data: auctionTournamentPlayer } = await supabase
+      .from('tournament_players')
+      .select('market_value')
+      .eq('player_id', auction.player_id)
+      .eq('tournament_id', auctionTournamentId ?? '')
+      .maybeSingle()
 
-      if (tournamentPlayer && tournamentPlayer.market_value) {
-        if (bidAmount < tournamentPlayer.market_value) {
-          return NextResponse.json({ 
-            error: `Gebot muss mindestens dem Marktwert von ${tournamentPlayer.market_value}€ entsprechen` 
-          }, { status: 400 })
-        }
+    auctionMarketValue = auctionTournamentPlayer?.market_value ?? null
+
+    // Market-value minimum check
+    if (auctionMarketValue != null) {
+      if (bidAmount < auctionMarketValue) {
+        return NextResponse.json({
+          error: `Gebot muss mindestens dem Marktwert von ${auctionMarketValue}€ entsprechen`
+        }, { status: 400 })
       }
     }
 
-    // Sum all bids the team already has on other still-active auctions
+    // Read per-tournament budget for this team
+    let teamBudget = 0
+    if (auctionTournamentId) {
+      const { data: stats } = await supabase
+        .from('fantasy_team_tournament_stats')
+        .select('budget')
+        .eq('team_id', team.id)
+        .eq('tournament_id', auctionTournamentId)
+        .single()
+      teamBudget = Number(stats?.budget ?? 0)
+    }
+
+    // Determine overdraft allowance: up to 1/3 of the tournament's start_budget
+    let maxOverdraft = 0
+    if (auctionTournamentId) {
+      const { data: tournamentRow } = await supabase
+        .from('tournaments')
+        .select('start_budget')
+        .eq('id', auctionTournamentId)
+        .single()
+      maxOverdraft = Math.floor(Number(tournamentRow?.start_budget ?? 0) / 3)
+    }
+    const effectiveBudget = teamBudget + maxOverdraft
+
+    // Sum all bids the team already has on other still-active auctions FOR THE SAME TOURNAMENT.
+    // Budgets are per-tournament, so bids on auctions of other tournaments must not be counted here.
     const { data: activeOtherAuctions } = await supabase
       .from('market_auctions')
       .select('id')
       .gt('end_time', nowIso)
       .neq('id', auctionId)
+      .eq('tournament_id', auctionTournamentId ?? '')
 
     const activeOtherIds = (activeOtherAuctions || []).map((a: any) => a.id as string)
     let sumOtherActiveBids = 0
@@ -100,9 +126,9 @@ export async function POST(request: Request) {
       sumOtherActiveBids = (otherBids || []).reduce((sum: number, b: any) => sum + Number(b.bid_amount), 0)
     }
 
-    if (sumOtherActiveBids + bidAmount > Number(team.budget || 0)) {
+    if (sumOtherActiveBids + bidAmount > effectiveBudget) {
       return NextResponse.json({
-        error: `Nicht genug Budget. Bereits für andere Auktionen geboten: ${sumOtherActiveBids.toLocaleString('de-DE')}\u20ac, verfügbares Budget: ${Number(team.budget).toLocaleString('de-DE')}\u20ac`
+        error: `Nicht genug Budget. Bereits für andere Auktionen geboten: ${sumOtherActiveBids.toLocaleString('de-DE')}\u20ac, verfügbares Budget inkl. Überziehungsrahmen: ${effectiveBudget.toLocaleString('de-DE')}\u20ac`
       }, { status: 400 })
     }
 

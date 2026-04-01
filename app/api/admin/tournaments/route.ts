@@ -51,6 +51,7 @@ export async function POST(request: NextRequest) {
   const countryCodeRaw = body?.country_code as string | undefined
   const previousWinnerPlayerIdRaw = body?.previous_winner_player_id as string | null | undefined
   const tournamentTypeRaw = body?.tournament_type as string | null | undefined
+  const newcomerEnabled = body?.newcomer_enabled as boolean | undefined
 
   if (!name || !startDate) {
     return NextResponse.json({ error: 'name and startDate are required' }, { status: 400 })
@@ -98,6 +99,7 @@ export async function POST(request: NextRequest) {
       previous_winner_player_id: previousWinnerPlayerId,
       tournament_category: tournamentTypeOption?.category ?? null,
       singles_player_count: tournamentTypeOption?.singlesPlayerCount ?? null,
+      newcomer_enabled: newcomerEnabled !== false,
     })
     .select()
     .single()
